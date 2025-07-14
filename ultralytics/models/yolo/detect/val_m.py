@@ -85,6 +85,16 @@ class DetectionValidator_m(BaseValidator_m):
 
     def postprocess(self, preds):
         """Apply Non-maximum suppression to prediction outputs."""
+        if len(preds) == 3 and len(preds[0][1]) == 3:
+            return ops.non_max_suppression(
+                preds[-1],
+                self.args.conf,
+                self.args.iou,
+                labels=self.lb,
+                multi_label=True,
+                agnostic=self.args.single_cls,
+                max_det=self.args.max_det,
+            )
         return ops.non_max_suppression(
             preds,
             self.args.conf,
@@ -180,7 +190,8 @@ class DetectionValidator_m(BaseValidator_m):
         pf = "%22s" + "%11i" * 2 + "%11.3g" * len(self.metrics.keys)  # print format
         LOGGER.info(pf % ("all", self.seen, self.nt_per_class.sum(), *self.metrics.mean_results()))
         if self.nt_per_class.sum() == 0:
-            LOGGER.warning(f"WARNING ⚠️ no labels found in {self.args.task} set, can not compute metrics without labels")
+            LOGGER.warning(
+                f"WARNING ⚠️ no labels found in {self.args.task} set, can not compute metrics without labels")
 
         # Print results per class
         if self.args.verbose and not self.training and self.nc > 1 and len(self.stats):
@@ -218,7 +229,8 @@ class DetectionValidator_m(BaseValidator_m):
             mode (str): `train` mode or `val` mode, users are able to customize different augmentations for each mode.
             batch (int, optional): Size of batches, this is for `rect`. Defaults to None.
         """
-        return build_yolo_dataset_m(self.args, img_path_rgb, img_path_ir, batch, self.data, mode=mode, stride=self.stride)
+        return build_yolo_dataset_m(self.args, img_path_rgb, img_path_ir, batch, self.data, mode=mode,
+                                    stride=self.stride)
 
     def get_dataloader(self, dataset_path_rgb, data_path_ir, batch_size):
         """Construct and return dataloader."""

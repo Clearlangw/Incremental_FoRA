@@ -1,17 +1,19 @@
 from ultralytics import YOLO
 
-model = YOLO("yolov8l.yaml")
-model.train(data="LLVIP.yaml",
+model = YOLO("yolov8x.yaml")
+# print(model)
+model.train(data="drone_vehicle.yaml",
             epochs=50,
             patience=30,
-            batch=8,
+            batch=56,
+            device=[0, 1],
             imgsz=640,
-            device=2,
             # r_init=24,
             # r_target=6,
             # adalora=False,
-            project="LLVIP",
-            name='yolov8l_ir_e50_bs8',
+            exist_ok=True,
+            project="DroneVehicle",
+            name='TIF_yolov8x',
             resume=False,
             pretrained=False,
             optimizer='auto',

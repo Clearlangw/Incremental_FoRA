@@ -1,0 +1,18 @@
+path: /root/autodl-tmp/dv_vedai/
+train_rgb: rgb/images/train/
+val_rgb: rgb/images/test/
+test_rgb: rgb/images/test/
+
+train_ir: ir/images/train/
+val_ir: ir/images/test/
+test_ir: ir/images/test/
+
+names:
+  0: car
+  1: truck
+  2: bus
+  3: feright_car
+  4: van
+  5: pick-up
+  6: camping-car
+  7: tractor

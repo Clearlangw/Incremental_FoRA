@@ -1,0 +1,16 @@
+path: /root/autodl-tmp/
+train_rgb: RGB_car_and_plane/images/train/
+val_rgb: RGB_car_and_plane/images/test/
+test_rgb: RGB_car_and_plane/images/test/
+
+train_ir: IR_car_and_plane/images/train/
+val_ir: IR_car_and_plane/images/test/
+test_ir: IR_car_and_plane/images/test/
+
+names:
+  0: car
+  1: truck
+  2: bus
+  3: feright_car
+  4: van
+  5: plane

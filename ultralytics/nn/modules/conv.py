@@ -22,6 +22,7 @@ __all__ = (
     "Concat",
     "RepConv",
     "Add",
+    "Split",
 )
 
 
@@ -75,7 +76,7 @@ class Conv2(Conv):
         """Fuse parallel convolutions."""
         w = torch.zeros_like(self.conv.weight.data)
         i = [x // 2 for x in w.shape[2:]]
-        w[:, :, i[0] : i[0] + 1, i[1] : i[1] + 1] = self.cv2.weight.data.clone()
+        w[:, :, i[0]: i[0] + 1, i[1]: i[1] + 1] = self.cv2.weight.data.clone()
         self.conv.weight.data += w
         self.__delattr__("cv2")
         self.forward = self.forward_fuse
@@ -340,3 +341,16 @@ class Add(nn.Module):
 
     def forward(self, x):
         return torch.add(x[0], x[1])
+
+
+class Split(nn.Module):
+    def __init__(self, c1):
+        super().__init__()
+        self.mode = c1
+
+    def forward(self, x):
+        if self.mode == 0:
+            return x[0]
+        elif self.mode == 1:
+            return x[1]
+        return [x[0], x[1]]

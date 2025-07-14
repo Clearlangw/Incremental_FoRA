@@ -89,6 +89,10 @@ class DetectionTrainer_m(BaseTrainer_m):
 
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Return a YOLO detection model."""
+        #TODO:这里检查加载的模型
+        # print(cfg)
+        # import sys
+        # sys.exit()
         model = DetectionModel_m(cfg, nc=self.data["nc"], verbose=verbose and RANK == -1)
         if weights:
             model.load(weights)

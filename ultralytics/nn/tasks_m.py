@@ -1,5 +1,5 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
-
+import ultralytics.global_mode as gb  # TODO：
 import contextlib
 from copy import deepcopy
 from pathlib import Path
@@ -59,6 +59,12 @@ from ultralytics.nn.modules import (
     Conv_adalora_asym_m,
     C2f_adalora_asym_m,
     SPPF_adalora_asym_m,
+    Split,
+    ScaleConvFuse,
+    A2C2f,
+    A2C2f_adalora_sym_m,
+    HybridAtt_adalora_sym_m,
+    ReDetect,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -82,17 +88,20 @@ except ImportError:
 
 import numpy as np
 
+
 def calculate_pearson(x0, x1):
     x0_ = x0 - np.mean(x0)
     x1_ = x1 - np.mean(x1)
     p = np.dot(x0_, x1_) / (np.linalg.norm(x0_) * np.linalg.norm(x1_))
     return p
 
+
 import math
 import cv2
 
+
 def feature_visualization_m(x, m_f, save_dir=Path("runs/detect/exp")):
-    if m_f == 4: # m_f == 4 4 in m_f
+    if m_f == 4:  # m_f == 4 4 in m_f
         stage = 'stage3'
     if m_f == 6:
         stage = 'stage4'
@@ -107,9 +116,9 @@ def feature_visualization_m(x, m_f, save_dir=Path("runs/detect/exp")):
     # cv2.imwrite(save_dir+'_'+stage+'_ir.png', y_ir)
 
     # _, channels, height, width = x[0].shape  # batch, channels, height, width
-    
+
     # blocks = []
-    blocks = torch.max(x[0].cpu(), 1)[0][:, 110//8:594//8, 110//8:721//8]
+    blocks = torch.max(x[0].cpu(), 1)[0][:, 110 // 8:594 // 8, 110 // 8:721 // 8]
     # blocks.append(torch.zeros_like(blocks[0]))
     # for i in range(x[0].shape[1]):
     #     blocks[1] += x[0][:, i, :, :].cpu()
@@ -119,16 +128,16 @@ def feature_visualization_m(x, m_f, save_dir=Path("runs/detect/exp")):
     # for i in range(2):
     #     ax[i].imshow(blocks[i].squeeze())  # cmap='gray'
     #     ax[i].axis("off")
-    plt.imshow(blocks.squeeze(),cmap='jet')
+    plt.imshow(blocks.squeeze(), cmap='jet')
     plt.axis("off")
 
-    f = save_dir+'_'+stage+'_rgb.png'
+    f = save_dir + '_' + stage + '_rgb.png'
     LOGGER.info(f"Saving {f}...")
     plt.savefig(f, dpi=300, bbox_inches="tight")
     plt.close()
 
     # blocks = []
-    blocks = torch.max(x[1].cpu(), 1)[0][:, 110//8:594//8, 110//8:721//8]
+    blocks = torch.max(x[1].cpu(), 1)[0][:, 110 // 8:594 // 8, 110 // 8:721 // 8]
     # blocks.append(torch.zeros_like(blocks[0]))
     # for i in range(x[1].shape[1]):
     #     blocks[1] += x[1][:, i, :, :].cpu()
@@ -138,11 +147,10 @@ def feature_visualization_m(x, m_f, save_dir=Path("runs/detect/exp")):
     # for i in range(2):
     #     ax[i].imshow(blocks[i].squeeze())  # cmap='gray'
     #     ax[i].axis("off")
-    plt.imshow(blocks.squeeze(),cmap='jet')
+    plt.imshow(blocks.squeeze(), cmap='jet')
     plt.axis("off")
 
-
-    f = save_dir+'_'+stage+'_ir.png'
+    f = save_dir + '_' + stage + '_ir.png'
     LOGGER.info(f"Saving {f}...")
     plt.savefig(f, dpi=300, bbox_inches="tight")
     plt.close()
@@ -150,7 +158,7 @@ def feature_visualization_m(x, m_f, save_dir=Path("runs/detect/exp")):
 
 
 def feature_visualization_m1(x, m_f, save_dir=Path("runs/detect/exp")):
-    if m_f == 4: #  4 in m_f
+    if m_f == 4:  # 4 in m_f
         stage = 'stage3'
     if m_f == 6:
         stage = 'stage4'
@@ -166,7 +174,7 @@ def feature_visualization_m1(x, m_f, save_dir=Path("runs/detect/exp")):
 
     # _, channels, height, width = x[0].shape  # batch, channels, height, width
     # blocks = []
-    blocks = torch.max(x.cpu(), 1)[0][:, 110//8:594//8, 110//8:721//8]
+    blocks = torch.max(x.cpu(), 1)[0][:, 110 // 8:594 // 8, 110 // 8:721 // 8]
     # blocks.append(torch.zeros_like(blocks[0]))
     # for i in range(x.shape[1]):
     #     blocks[1] += x[:, i, :, :].cpu()
@@ -176,18 +184,28 @@ def feature_visualization_m1(x, m_f, save_dir=Path("runs/detect/exp")):
     # for i in range(2):
     #     ax[i].imshow(blocks[i].squeeze())  # cmap='gray'
     #     ax[i].axis("off")
-    plt.imshow(blocks.squeeze(),cmap='jet')
+    plt.imshow(blocks.squeeze(), cmap='jet')
     plt.axis("off")
 
-    f = save_dir+'_'+stage+'_fusion.png'
+    f = save_dir + '_' + stage + '_fusion.png'
     LOGGER.info(f"Saving {f}...")
     plt.savefig(f, dpi=300, bbox_inches="tight")
     plt.close()
 
 
-
 class BaseModel_m(nn.Module):
     """The BaseModel class serves as a base class for all the models in the Ultralytics YOLO family."""
+
+    def __init__(self):
+        super().__init__()
+        # self.modal = 'both'
+        # print(gb.global_mode)
+        # print(gb.read_global_mode())
+        # print("whyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy")
+        self.modal = gb.read_global_mode()
+        # import sys
+        # sys.exit()
+        self.train_mode = False
 
     def forward(self, x_rgb, x_ir, *args, **kwargs):
         """
@@ -199,8 +217,19 @@ class BaseModel_m(nn.Module):
         Returns:
             (torch.Tensor): The output of the network.
         """
+        # TODO:训练时xrgb指的是整个batch而不是xrgb特征本身
+        # if isinstance(x_rgb, dict):
+        #     print(x_rgb.keys()) #dict_keys(['im_file_rgb', 'im_file_ir', 'ori_shape', 'resized_shape', 'img_rgb', 'img_ir', 'cls', 'bboxes', 'batch_idx'])
+
         if isinstance(x_rgb, dict):  # for cases of training and validating while training.
+            # print("what fxxk")
+            # print("|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||")
+            # import sys
+            # sys.exit()
+            # self.modal = 'both'
+            self.train_mode = True
             return self.loss(x_rgb, *args, **kwargs)
+
         return self.predict(x_rgb, x_ir, *args, **kwargs)
 
     def predict(self, x_rgb, x_ir, profile=False, visualize=False, augment=False, embed=None):
@@ -217,6 +246,26 @@ class BaseModel_m(nn.Module):
         Returns:
             (torch.Tensor): The last output of the model.
         """
+        # epsilon = 1e-30  # 可根据需要调整的阈值
+        # is_rgb_all_zero = (torch.abs(x_rgb) < epsilon).all()
+        # is_ir_all_zero = (torch.abs(x_ir) < epsilon).all()
+
+        # if is_rgb_all_zero and is_ir_all_zero:
+        #     pass
+        #     #不变 fuse的情况是双模态推理
+        #     #self.modal = 'fuse'
+        # elif not is_rgb_all_zero and not is_ir_all_zero:
+        #     #看是不是train
+        #     if self.train_mode:
+        #         self.modal = 'both'
+        #     else:
+        #         self.modal = 'fuse'
+        #     #不变
+        # elif is_rgb_all_zero and not is_ir_all_zero:
+        #     self.modal = 'ir'
+        # elif not is_rgb_all_zero and is_ir_all_zero: #TODO:这里改了modal
+        #     self.modal = 'rgb'
+
         if augment:
             return self._predict_augment(x_rgb, x_ir)
         return self._predict_once(x_rgb, x_ir, profile, visualize, embed)
@@ -271,8 +320,7 @@ class BaseModel_m(nn.Module):
         #     cv2.imwrite(save_dir+str(index)+'_input_rgb.png', input_rgb)
         #     input_ir = x_ir[0][:, 110:594, 110:721].permute(1, 2, 0).cpu().numpy() * 255
         #     cv2.imwrite(save_dir+str(index)+'input_ir.png', input_ir)
-
-
+        output_x = []  # TODO：这个是list
         y, dt, embeddings = [], [], []  # outputs
         x = x_rgb
         for m in self.model:
@@ -285,7 +333,7 @@ class BaseModel_m(nn.Module):
                     x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
             if profile:
                 self._profile_one_layer(m, x, dt)
-            
+
             # if pearson:
             #     if (m.i in [p1, p2, p3, p4, p5]) and (x[0].size()[0] != 1):
             #         for i in range(x[0].size()[0]):
@@ -305,18 +353,33 @@ class BaseModel_m(nn.Module):
 
             # if visualize and 'Add' in m.type and x_rgb.shape[-1] != 32 and m.f == 4: # m.f == 4 4 in m.f
             #     feature_visualization_m(x, m.f, save_dir=save_dir+str(index))
-            
-            x = m(x)  # run
 
+            x = m(x)  # run
+            if isinstance(m, Detect):
+                output_x.append(x)  # TODO：这里修改了list
+            elif isinstance(m, ReDetect):
+                output_x.append(x)
             # if visualize and 'Add' in m.type and x_rgb.shape[-1] != 32 and m.f == 4: # m.f == 4 4 in m.f
             #     feature_visualization_m1(x, m.f, save_dir=save_dir+str(index))
-            
+
             y.append(x if m.i in self.save else None)  # save output
-            
+
             if embed and m.i in embed:
                 embeddings.append(nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
                 if m.i == max(embed):
                     return torch.unbind(torch.cat(embeddings, 1), dim=0)
+        # print(len(output_x))
+        # print("lllllllllllllllllllllllllllllllllllllllllllllllllllll")
+        if self.modal == 'rgb':  # TODO:默认的情况下会是rgb，正好只会有最后的输出头输出，因此单头也可以训练预测
+            return output_x[0]
+        elif self.modal == 'ir':
+            return output_x[1]
+        elif self.modal == 'fuse':
+            return output_x[-1]
+        elif self.modal == 'both':
+            # print('whatttttttttttttttttttttttttttttttttttttttttt')
+            return output_x
+        # print(self.modal)
         return x
 
     def _predict_augment(self, x_rgb, x_ir):
@@ -414,11 +477,12 @@ class BaseModel_m(nn.Module):
             (BaseModel): An updated BaseModel object.
         """
         self = super()._apply(fn)
-        m = self.model[-1]  # Detect()
-        if isinstance(m, Detect):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
-            m.stride = fn(m.stride)
-            m.anchors = fn(m.anchors)
-            m.strides = fn(m.strides)
+        for i in range(1, 4):
+            m = self.model[-i]  # Detect()
+            if isinstance(m, Detect):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
+                m.stride = fn(m.stride)
+                m.anchors = fn(m.anchors)
+                m.strides = fn(m.strides)
         return self
 
     def load(self, weights, verbose=True):
@@ -462,13 +526,23 @@ class DetectionModel_m(BaseModel_m):
         """Initialize the YOLOv8 detection model with the given config and parameters."""
         super().__init__()
         self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)  # cfg dict
-
+        self.is_incremental = False
         # Define model
         ch = self.yaml["ch"] = self.yaml.get("ch", ch)  # input channels
+        # 关键：类别数覆盖
         if nc and nc != self.yaml["nc"]:
             LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml["nc"] = nc  # override YAML value
+
+        if self.yaml.get("base_nc", None):
+            self.base_nc = self.yaml["base_nc"]
+            LOGGER.info(f"Incremental model detected, base_nc: {self.base_nc}, Incremental Loss turns on")
+            self.is_incremental = True
+
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
+        # 麻了，居然从这里就开始初始化
+        #TODO：哈哈，误会了吧，发现实际的调用树是走了Model.train(ultralytics/engine/model.py)直接给trainer给get_model了。。。我。。。不过底层还是attempt_load_one_weight哈
+        #调用树 Trainer调用setup_model，这里加载了模型权重（attempt_load_one_weight），之后调用到trainer_m.get_model，实际上是初始化Model（），parse_model则是实现了模型的参数解析组装
         self.names = {i: f"{i}" for i in range(self.yaml["nc"])}  # default names dict
         self.inplace = self.yaml.get("inplace", True)
 
@@ -478,11 +552,22 @@ class DetectionModel_m(BaseModel_m):
             s = 256  # 2x min stride
             m.inplace = self.inplace
             forward = lambda x: self.forward(x, x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.forward(x, x)
-            m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s))])  # forward
+            if self.modal == 'both':
+                m.stride = torch.tensor([s / x.shape[-2] for x in (forward(torch.zeros(1, ch, s, s)))[-1]])
+                # print(m.stride)
+            else:
+                m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s))])  # forward
             self.stride = m.stride
             m.bias_init()  # only run once
         else:
             self.stride = torch.Tensor([32])  # default stride for i.e. RTDETR
+
+        for i in range(2, 4):  # TODO:初始化其他头
+            m = self.model[-i]
+            if isinstance(m, Detect):
+                m.inplace = self.inplace
+                m.stride = self.stride
+                m.bias_init()
 
         # Init weights, biases
         initialize_weights(self)
@@ -499,7 +584,7 @@ class DetectionModel_m(BaseModel_m):
         for si, fi in zip(s, f):
             xi_rgb = scale_img(x_rgb.flip(fi) if fi else x_rgb, si, gs=int(self.stride.max()))
             xi_ir = scale_img(x_ir.flip(fi) if fi else x_ir, si, gs=int(self.stride.max()))
-            yi = super().predict(xi_rgb, xi_ir)[0]  # forward
+            yi = super().predict(xi_rgb, xi_ir)[0]  # 实际调用forward #TODO：这里该上modal这个概念了
             yi = self._descale_pred(yi, fi, si, img_size)
             y.append(yi)
         y = self._clip_augmented(y)  # clip augmented tails
@@ -519,9 +604,9 @@ class DetectionModel_m(BaseModel_m):
     def _clip_augmented(self, y):
         """Clip YOLO augmented inference tails."""
         nl = self.model[-1].nl  # number of detection layers (P3-P5)
-        g = sum(4**x for x in range(nl))  # grid points
+        g = sum(4 ** x for x in range(nl))  # grid points
         e = 1  # exclude layer count
-        i = (y[0].shape[-1] // g) * sum(4**x for x in range(e))  # indices
+        i = (y[0].shape[-1] // g) * sum(4 ** x for x in range(e))  # indices
         y[0] = y[0][..., :-i]  # large
         i = (y[-1].shape[-1] // g) * sum(4 ** (nl - 1 - x) for x in range(e))  # indices
         y[-1] = y[-1][..., i:]  # small
@@ -529,7 +614,18 @@ class DetectionModel_m(BaseModel_m):
 
     def init_criterion(self):
         """Initialize the loss criterion for the DetectionModel."""
-        return v8DetectionLoss(self)
+        print(f"是否启用增量损失：{self.is_incremental}")
+        return v8DetectionLoss(self,self.is_incremental)
+
+# # TODO：这里等等看要不要增量
+# class IncrementalDetectionModel_m(DetectionModel_m):
+#     """YOLOv8 detection model for incremental learning."""
+
+#     def init_criterion(self):
+#         """Initialize the loss criterion for incremental learning detection model."""
+#         # TODO: 在这里实现增量学习的损失函数
+#         # 可能需要包含蒸馏损失、知识保持损失等
+#         return v8DetectionLoss(self)  # 暂时使用原始损失，后续可以替换为增量学习损失
 
 
 class OBBModel_m(DetectionModel_m):
@@ -897,11 +993,11 @@ def torch_safe_load(weight):
     file = attempt_download_asset(weight)  # search online if missing locally
     try:
         with temporary_modules(
-            {
-                "ultralytics.yolo.utils": "ultralytics.utils",
-                "ultralytics.yolo.v8": "ultralytics.models.yolo",
-                "ultralytics.yolo.data": "ultralytics.data",
-            }
+                {
+                    "ultralytics.yolo.utils": "ultralytics.utils",
+                    "ultralytics.yolo.v8": "ultralytics.models.yolo",
+                    "ultralytics.yolo.data": "ultralytics.data",
+                }
         ):  # for legacy 8.0 Classify and Pose models
             ckpt = torch.load(file, map_location="cpu")
 
@@ -935,10 +1031,10 @@ def torch_safe_load(weight):
 
     return ckpt, file  # load
 
-
+## 这里的两个load都没被调用哈
 def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
     """Loads an ensemble of models weights=[a,b,c] or a single model weights=[a] or weights=a."""
-
+    #给resume用的
     ensemble = Ensemble()
     for w in weights if isinstance(weights, list) else [weights]:
         ckpt, w = torch_safe_load(w)  # load ckpt
@@ -977,6 +1073,7 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
 
 def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
     """Loads a single model weights."""
+    #正常走的
     ckpt, weight = torch_safe_load(weight)  # load ckpt
     args = {**DEFAULT_CFG_DICT, **(ckpt.get("train_args", {}))}  # combine model and default args, preferring model args
     model = (ckpt.get("ema") or ckpt["model"]).to(device).float()  # FP32 model
@@ -1008,6 +1105,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     # Args
     max_channels = float("inf")
     nc, act, scales = (d.get(x) for x in ("nc", "activation", "scales"))
+    base_nc = d.get("base_nc", 60)  # 添加base_nc变量定义
     depth, width, kpt_shape = (d.get(x, 1.0) for x in ("depth_multiple", "width_multiple", "kpt_shape"))
     if scales:
         scale = d.get("scale")
@@ -1024,9 +1122,17 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     if verbose:
         LOGGER.info(f"\n{'':>3}{'from':>20}{'n':>3}{'params':>10}  {'module':<45}{'arguments':<30}")
     ch = [ch]
+    modal = 'both'
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
         m = getattr(torch.nn, m[3:]) if "nn." in m else globals()[m]  # get module
+        last_arg = args[-1]  # TODO:这里获取了模态
+        if last_arg in ('both', 'fuse', 'rgb', 'ir'):
+            modal = last_arg
+            args = [*args[:-1]]
+        else:
+            modal = 'both'
+
         for j, a in enumerate(args):
             if isinstance(a, str):
                 with contextlib.suppress(ValueError):
@@ -1034,40 +1140,42 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
 
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
         if m in (
-            Classify,
-            Conv,
-            ConvTranspose,
-            GhostConv,
-            Bottleneck,
-            GhostBottleneck,
-            SPP,
-            SPPF,
-            DWConv,
-            Focus,
-            BottleneckCSP,
-            C1,
-            C2,
-            C2f,
-            C2fAttn,
-            C3,
-            C3TR,
-            C3Ghost,
-            nn.ConvTranspose2d,
-            DWConvTranspose2d,
-            C3x,
-            RepC3,
-            Conv_lora_m,
-            C2f_lora_m,
-            SPPF_lora_m,
-            Conv_all_lora_m,
-            C2f_all_lora_m,
-            SPPF_all_lora_m,
-            Conv_adalora_sym_m,
-            C2f_adalora_sym_m,
-            SPPF_adalora_sym_m,
-            Conv_adalora_asym_m,
-            C2f_adalora_asym_m,
-            SPPF_adalora_asym_m,
+                Classify,
+                Conv,
+                ConvTranspose,
+                GhostConv,
+                Bottleneck,
+                GhostBottleneck,
+                SPP,
+                SPPF,
+                DWConv,
+                Focus,
+                BottleneckCSP,
+                C1,
+                C2,
+                C2f,
+                C2fAttn,
+                C3,
+                C3TR,
+                C3Ghost,
+                nn.ConvTranspose2d,
+                DWConvTranspose2d,
+                C3x,
+                RepC3,
+                Conv_lora_m,
+                C2f_lora_m,
+                SPPF_lora_m,
+                Conv_all_lora_m,
+                C2f_all_lora_m,
+                SPPF_all_lora_m,
+                Conv_adalora_sym_m,
+                C2f_adalora_sym_m,
+                SPPF_adalora_sym_m,
+                Conv_adalora_asym_m,
+                C2f_adalora_asym_m,
+                SPPF_adalora_asym_m,
+                A2C2f_adalora_sym_m,
+                A2C2f,
         ):
             if op.eq(f, [-1, -1]) or f == -4:
                 c1, c2 = 3, args[0]
@@ -1085,9 +1193,17 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
 
             args = [c1, c2, *args[1:]]
             if m in (BottleneckCSP, C1, C2, C2f, C2fAttn, C3, C3TR, C3Ghost, C3x, RepC3, \
-                     C2f_lora_m, C2f_all_lora_m, C2f_adalora_sym_m, C2f_adalora_asym_m):
+                     C2f_lora_m, C2f_all_lora_m, C2f_adalora_sym_m, C2f_adalora_asym_m,\
+                    A2C2f_adalora_sym_m,A2C2f):
                 args.insert(2, n)  # number of repeats
                 n = 1
+        elif m is HybridAtt_adalora_sym_m:
+            c2 = args[0]
+            if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            args = [ch[f[0]],ch[f[1]],ch[f[2]],c2,*args[1:]]
+            args.insert(4, n)  # number of repeats
+            n = 1
         elif m is AIFI:
             args = [ch[f], *args]
         elif m in (HGStem, HGBlock):
@@ -1113,10 +1229,24 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 raise TypeError('The channel nums of the two feature maps must be the same.')
         elif m in (Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn):
             args.append([ch[x] for x in f])
+            # print(args)
+            # import sys
+            # sys.exit()
             if m is Segment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
+        #TODO：这里添加对ReDetect的支持
+        elif m is ReDetect:  # 添加对ReDetect的支持
+            #args.append(base_nc)
+            args.append([ch[x] for x in f])
+            # print(args)
+            # import sys
+            # sys.exit()
         elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
+        elif m is ScaleConvFuse:
+            c1 = ch[f]
+            c2 = args[0]
+            args = [c1, *args]
         else:
             c2 = ch[f]
 
@@ -1124,6 +1254,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         t = str(m)[8:-2].replace("__main__.", "")  # module type
         m.np = sum(x.numel() for x in m_.parameters())  # number params
         m_.i, m_.f, m_.type = i, f, t  # attach index, 'from' index, type
+        m_.modal = modal  # TODO:这里添加了模型的modal属性
+
         if verbose:
             LOGGER.info(f"{i:>3}{str(f):>20}{n_:>3}{m.np:10.0f}  {t:<45}{str(args):<30}")  # print
         save.extend(x % i for x in ([f] if isinstance(f, int) else f) if x != -1)  # append to savelist

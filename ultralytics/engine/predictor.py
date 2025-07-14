@@ -110,6 +110,8 @@ class BasePredictor:
         self.callbacks = _callbacks or callbacks.get_default_callbacks()
         self.txt_path = None
         self._lock = threading.Lock()  # for automatic thread-safe inference
+        # print(self.args)
+        # print(self.model)
         callbacks.add_integration_callbacks(self)
 
     def preprocess(self, im):
@@ -128,6 +130,7 @@ class BasePredictor:
 
         im = im.to(self.device)
         im = im.half() if self.model.fp16 else im.float()  # uint8 to fp16/32
+        # print(self.model.fp16)
         if not_tensor:
             im /= 255  # 0 - 255 to 0.0 - 1.0
         return im
@@ -139,6 +142,9 @@ class BasePredictor:
             if self.args.visualize and (not self.source_type.tensor)
             else False
         )
+        # print(self.args.augment)
+        # print("immmmmmmmmmmmmmmmmmmmmmmmm")
+        # print(self.args)
         return self.model(im, augment=self.args.augment, visualize=visualize, embed=self.args.embed, *args, **kwargs)
 
     def pre_transform(self, im):
@@ -152,6 +158,9 @@ class BasePredictor:
             (list): A list of transformed images.
         """
         same_shapes = all(x.shape == im[0].shape for x in im)
+        # print(self.model)
+        # print(self.model.pt)
+        # print(self.model.stride)
         letterbox = LetterBox(self.imgsz, auto=same_shapes and self.model.pt, stride=self.model.stride)
         return [letterbox(image=x) for x in im]
 
@@ -200,6 +209,9 @@ class BasePredictor:
     def __call__(self, source=None, model=None, stream=False, *args, **kwargs):
         """Performs inference on an image or stream."""
         self.stream = stream
+        # print(self.model)
+        # print("ssssssssssssssssssssssssssssss")
+        # print(model)
         if stream:
             return self.stream_inference(source, model, *args, **kwargs)
         else:
@@ -227,6 +239,10 @@ class BasePredictor:
             if self.args.task == "classify"
             else None
         )
+        # print(source)
+        # print(self.args.vid_stride)
+        # print(self.args.stream_buffer)
+        # print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
         self.dataset = load_inference_source(
             source=source, vid_stride=self.args.vid_stride, buffer=self.args.stream_buffer
         )
@@ -246,6 +262,7 @@ class BasePredictor:
         """Streams real-time inference on camera feed and saves results to file."""
         if self.args.verbose:
             LOGGER.info("")
+        # print(self.model)
 
         # Setup model
         if not self.model:
@@ -349,6 +366,7 @@ class BasePredictor:
             fuse=True,
             verbose=verbose,
         )
+        # print(self.args)
 
         self.device = self.model.device  # update device
         self.args.half = self.model.fp16  # update half

@@ -53,7 +53,7 @@ TASK2METRIC = {
     "pose": "metrics/mAP50-95(P)",
     "obb": "metrics/mAP50-95(B)",
 }
-
+#TODO 新增：incremental_yaml = "drone_vehicle_m.yaml",#增量的模型
 CLI_HELP_MSG = f"""
     Arguments received: {str(['yolo'] + sys.argv[1:])}. Ultralytics 'yolo' commands use the following syntax:
 

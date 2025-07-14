@@ -39,5 +39,7 @@ class DetectionPredictor(BasePredictor):
             orig_img = orig_imgs[i]
             pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], orig_img.shape)
             img_path = self.batch[0][i]
+            # print(img_path)
+            # print("fxxxxxxxxxxxxxxxxxxxxx")
             results.append(Results(orig_img, path=img_path, names=self.model.names, boxes=pred))
         return results

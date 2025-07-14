@@ -86,6 +86,7 @@ class Model(nn.Module):
         model: Union[str, Path] = "yolov8n.pt",
         task: str = None,
         verbose: bool = False,
+        incremental_yaml: str = None, #增加了增量模型配置
     ) -> None:
         """
         Initializes a new instance of the YOLO model class.
@@ -121,6 +122,7 @@ class Model(nn.Module):
         self.task = task  # task type
         self.model_name = model = str(model).strip()  # strip spaces
 
+        self.incremental_yaml = yaml_model_load(incremental_yaml) if incremental_yaml else None
         # Check if Ultralytics HUB model from https://hub.ultralytics.com
         if self.is_hub_model(model):
             # Fetch model from HUB
@@ -226,7 +228,7 @@ class Model(nn.Module):
         """
         suffix = Path(weights).suffix
         if suffix == ".pt":
-            self.model, self.ckpt = attempt_load_one_weight(weights)
+            self.model, self.ckpt = attempt_load_one_weight(weights,incremental_yaml=self.incremental_yaml)
             self.task = self.model.args["task"]
             self.overrides = self.model.args = self._reset_ckpt_args(self.model.args)
             self.ckpt_path = self.model.pt_path
@@ -634,6 +636,14 @@ class Model(nn.Module):
 
         self.trainer = (trainer or self._smart_load("trainer"))(overrides=args, _callbacks=self.callbacks)
         if not args.get("resume"):  # manually set model only if not resuming
+            # print("&"*100)
+            # print(f"self.ckpt is None: {self.ckpt is None}")
+            # print(f"type(self.model): {type(self.model)}")
+            # print(f"self.model: {self.model}")
+            # print(f"self.model.yaml: {self.model.yaml}")
+            # print(f"self.incremental_yaml: {self.incremental_yaml}")
+            # import sys
+            # sys.exit()
             self.trainer.model = self.trainer.get_model(weights=self.model if self.ckpt else None, cfg=self.model.yaml)
             self.model = self.trainer.model
 

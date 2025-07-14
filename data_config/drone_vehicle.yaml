@@ -1,0 +1,12 @@
+path: /root/autodl-tmp/
+
+train: IR_DroneVehicle_v8/images/train/
+val: IR_DroneVehicle_v8/images/test/
+test: IR_DroneVehicle_v8/images/test/
+
+names:
+  0: car
+  1: truck
+  2: bus
+  3: feright_car
+  4: van

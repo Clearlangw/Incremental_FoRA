@@ -170,7 +170,11 @@ class RankAllocator(object):
                     self.exp_avg_ipt[n] = torch.zeros_like(p) 
                     self.exp_avg_unc[n] = torch.zeros_like(p) 
                 with torch.no_grad():
-                    # Calculate sensitivity 
+                    # Calculate sensitivity
+                    # print(n)
+                    # print(p.grad)
+                    if p.grad is None: #TODO:为了支持单模态训练
+                        continue
                     if torch.any(torch.isnan((p * p.grad).abs().detach())):
                         continue
                     if "lora_E" in n:
@@ -363,6 +367,11 @@ class BaseTrainer_m:
             overrides (dict, optional): Configuration overrides. Defaults to None.
         """
         self.args = get_cfg(cfg, overrides)
+        #TODO:incremental_yaml要代替原模型cfg传入
+        # print(self.args.incremental_yaml)
+        # print("&"*100)
+        self.incremental_yaml = self.args.incremental_yaml#这里没问题啊
+
         self.check_resume(overrides)
         self.device = select_device(self.args.device, self.args.batch)
         self.validator = None
@@ -393,6 +402,7 @@ class BaseTrainer_m:
 
         # Model and Dataset
         self.model = check_model_file_from_stem(self.args.model)  # add suffix, i.e. yolov8n -> yolov8n.pt
+
         try:
             if self.args.task == "classify":
                 self.data = check_cls_dataset(self.args.data)
@@ -801,15 +811,26 @@ class BaseTrainer_m:
     def setup_model(self):
         """Load/create/download model for any task."""
         if isinstance(self.model, torch.nn.Module):  # if model is loaded beforehand. No setup needed
+            # print("模型已加载，不需要进行模型设置")
+            # import sys
+            # sys.exit()
             return
-
         model, weights = self.model, None
         ckpt = None
+        #这里的cfg是模型的配置
         if str(model).endswith(".pt"):
+            #这里修改实现权重替换
+            # if self.args.incremental_yaml:
+            #     print("Trainer_m:尝试加载增量模型")
+            #     weights, ckpt = attempt_load_one_weight(model, incremental_yaml=self.args.incremental_yaml)
+            # else:
             weights, ckpt = attempt_load_one_weight(model)
             cfg = ckpt["model"].yaml
         else:
             cfg = model
+        # print(cfg)
+        # import sys
+        # sys.exit()
         self.model = self.get_model(cfg=cfg, weights=weights, verbose=RANK == -1)  # calls Model(cfg, weights)
         return ckpt
 
@@ -932,6 +953,7 @@ class BaseTrainer_m:
 
                 resume = True
                 self.args = get_cfg(ckpt_args)
+                # import ultralytics.global_mode as gb
                 self.args.model = str(last)  # reinstate model
                 for k in "imgsz", "batch":  # allow arg updates to reduce memory on resume if crashed due to CUDA OOM
                     if k in overrides:

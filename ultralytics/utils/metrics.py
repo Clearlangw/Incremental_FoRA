@@ -591,6 +591,7 @@ def ap_per_class(
         # Precision
         precision = tpc / (tpc + fpc)  # precision curve
         p_curve[ci] = np.interp(-x, -conf[i], precision[:, 0], left=1)  # p at pr_score
+        # tp: (torch.Tensor): Correct tensor of shape(N,10) for 10 IoU thresholds.
 
         # AP from recall-precision curve
         for j in range(tp.shape[1]):

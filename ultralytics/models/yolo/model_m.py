@@ -11,8 +11,7 @@ from ultralytics.utils import yaml_load, ROOT
 
 class YOLO_m(Model):
     """YOLO (You Only Look Once) object detection model."""
-
-    def __init__(self, model="yolov8n.pt", task=None, verbose=False):
+    def __init__(self, model="yolov8n.pt", task=None, verbose=False, incremental_yaml=None):
         """Initialize YOLO model, switching to YOLOWorld if model filename contains '-world'."""
         path = Path(model)
         if "-world" in path.stem and path.suffix in {".pt", ".yaml", ".yml"}:  # if YOLOWorld PyTorch model
@@ -21,7 +20,7 @@ class YOLO_m(Model):
             self.__dict__ = new_instance.__dict__
         else:
             # Continue with default YOLO initialization
-            super().__init__(model=model, task=task, verbose=verbose)
+            super().__init__(model=model, task=task, verbose=verbose, incremental_yaml=incremental_yaml)
 
     @property
     def task_map(self):

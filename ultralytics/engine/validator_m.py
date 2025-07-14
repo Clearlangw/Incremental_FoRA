@@ -175,8 +175,9 @@ class BaseValidator_m:
 
             # Inference
             with dt[1]:
+                # print(augment) False
                 preds = model(batch["img_rgb"], batch["img_ir"], augment=augment)
-
+                # print(isinstance(preds))
             # Loss
             with dt[2]:
                 if self.training:

@@ -37,6 +37,7 @@ from ultralytics.nn.modules import (
     HGBlock,
     HGStem,
     Pose,
+    ReDetect,
     RepC3,
     RepConv,
     ResNetLayer,
@@ -50,6 +51,7 @@ from ultralytics.nn.modules import (
     C2f_lora,
     SPPF_lora,
 )
+from ultralytics.nn.tasks_m import DetectionModel_m
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import v8ClassificationLoss, v8DetectionLoss, v8OBBLoss, v8PoseLoss, v8SegmentationLoss
@@ -746,10 +748,81 @@ def torch_safe_load(weight):
 
 def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
     """Loads an ensemble of models weights=[a,b,c] or a single model weights=[a] or weights=a."""
-
+    #resume走这个
     ensemble = Ensemble()
     for w in weights if isinstance(weights, list) else [weights]:
         ckpt, w = torch_safe_load(w)  # load ckpt
+        # 调试信息：输出ckpt["model"]的方法和属性
+        # print("=" * 50)
+        # print("ckpt['model'] 信息:")
+        # print(f"类型: {type(ckpt['model'])}")
+        # print(f"是否为nn.Module: {isinstance(ckpt['model'], nn.Module)}")
+
+        # # 输出所有属性
+        # print("\n属性列表:")
+        # for attr_name in dir(ckpt['model']):
+        #     if not attr_name.startswith('_'):
+        #         try:
+        #             attr_value = getattr(ckpt['model'], attr_name)
+        #             if not callable(attr_value):
+        #                 print(f"  {attr_name}: {type(attr_value)} = {attr_value}")
+        #         except Exception as e:
+        #             print(f"  {attr_name}: 无法访问 - {e}")
+
+        # # 输出所有方法
+        # print("\n方法列表:")
+        # for attr_name in dir(ckpt['model']):
+        #     if not attr_name.startswith('_'):
+        #         try:
+        #             attr_value = getattr(ckpt['model'], attr_name)
+        #             if callable(attr_value):
+        #                 print(f"  {attr_name}: {type(attr_value)}")
+        #         except Exception as e:
+        #             print(f"  {attr_name}: 无法访问 - {e}")
+
+        # # 输出模型结构
+        # print("\n模型结构:")
+        # print(ckpt['model'])
+
+        # # 输出named_modules信息
+        # print("\nNamed Modules (前10个):")
+        # module_count = 0
+        # for name, module in ckpt['model'].named_modules():
+        #     if module_count < 10:
+        #         print(f"  {name}: {type(module).__name__}")
+        #         module_count += 1
+        #     else:
+        #         print(f"  ... 还有更多模块")
+        #         break
+
+        # # 输出named_parameters信息
+        # print("\nNamed Parameters (前10个):")
+        # param_count = 0
+        # for name, param in ckpt['model'].named_parameters():
+        #     if param_count < 10:
+        #         print(f"  {name}: {param.shape}")
+        #         param_count += 1
+        #     else:
+        #         print(f"  ... 还有更多参数")
+        #         break
+
+        # # 检查是否有model属性
+        # if hasattr(ckpt['model'], 'model'):
+        #     print(f"\nckpt['model'].model 存在，类型: {type(ckpt['model'].model)}")
+        #     if hasattr(ckpt['model'].model, 'named_modules'):
+        #         print("ckpt['model'].model.named_modules() 前5个:")
+        #         for i, (name, module) in enumerate(ckpt['model'].model.named_modules()):
+        #             if i < 5:
+        #                 print(f"  {name}: {type(module).__name__}")
+        #             else:
+        #                 break
+        # else:
+        #     print("\nckpt['model'] 没有 'model' 属性")
+
+        # print("=" * 50)
+        # import sys
+        # sys.exit()
+
         args = {**DEFAULT_CFG_DICT, **ckpt["train_args"]} if "train_args" in ckpt else None  # combined args
         model = (ckpt.get("ema") or ckpt["model"]).to(device).float()  # FP32 model
 
@@ -783,12 +856,47 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
     return ensemble
 
 
-def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
+def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False,incremental_yaml=None):
     """Loads a single model weights."""
+    #不resume走这个
     ckpt, weight = torch_safe_load(weight)  # load ckpt
     args = {**DEFAULT_CFG_DICT, **(ckpt.get("train_args", {}))}  # combine model and default args, preferring model args
+    #我们这里应该是没有用到ema的
+    # print(ckpt.get("ema")) #None
     model = (ckpt.get("ema") or ckpt["model"]).to(device).float()  # FP32 model
 
+    is_incremental = incremental_yaml is not None
+    # 检查是否需要增量学习：Detect -> ReDetect
+    if is_incremental:
+        LOGGER.info("检测到增量学习模式，准备修改模型配置...")
+        
+        # 获取原始YAML配置
+        original_yaml = ckpt["model"].yaml
+        
+        # 检查是否包含Detect层
+        # has_detect = False
+        # for layer in original_yaml.get("head", []):
+        #     if isinstance(layer[2], str) and layer[2] == "Detect":
+        #         has_detect = True
+        #         break
+        # if has_detect:
+        #     LOGGER.info("发现Detect层，准备替换为ReDetect...")
+        # 创建新的YAML配置
+        new_yaml = deepcopy(incremental_yaml)
+        # 更新检查点中的YAML配置
+        ckpt["model"].yaml = new_yaml
+        LOGGER.info(f"YAML配置已更新，base_nc={ckpt['model'].yaml.get('base_nc')}")
+        new_model = DetectionModel_m(cfg=new_yaml, nc=ckpt['model'].yaml.get('nc'), verbose=True)
+        # print(type(ckpt["model"]))
+        # import sys
+        # sys.exit()            
+        # 重建模型并迁移权重
+        ckpt = rebuild_model_with_redetect(ckpt,new_model)
+        model = ckpt["model"].to(device).float()
+        LOGGER.info(f"模型已更新为ReDetect结构")
+        #print(ckpt['model'])
+    # import sys
+    # sys.exit()
     # Model compatibility updates
     model.args = {k: v for k, v in args.items() if k in DEFAULT_CFG_KEYS}  # attach args to model
     model.pt_path = weight  # attach *.pt file path to model
@@ -805,9 +913,72 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
         elif isinstance(m, nn.Upsample) and not hasattr(m, "recompute_scale_factor"):
             m.recompute_scale_factor = None  # torch 1.11.0 compatibility
 
-    # Return model and ckpt
+
     return model, ckpt
 
+def collect_dfl_layer_ids(model):
+    """收集模型中所有包含dfl的层ID"""
+    dfl_layer_ids = []
+    for name, module in model.named_modules():
+        if 'dfl' in name:
+            # 从名称中提取layer_id，例如 "model.56.dfl" -> 56
+            parts = name.split('.')
+            if len(parts) >= 2 and parts[-1] == 'dfl':
+                try:
+                    layer_id = int(parts[-2])
+                    dfl_layer_ids.append(layer_id)
+                except ValueError:
+                    continue
+    return sorted(list(set(dfl_layer_ids)))  # 去重并排序
+
+
+def rebuild_model_with_redetect(ckpt,new_model):
+    """重建模型并加载修改后的权重"""
+    # 1. 收集dfl层ID
+    dfl_layer_ids = collect_dfl_layer_ids(ckpt['model'])
+    print(f"找到的dfl层ID: {dfl_layer_ids}")
+    
+    # 2. 获取原始state_dict
+    state_dict = ckpt['model'].state_dict()
+    
+    # 3. 创建需要重命名的键值对和新增的键值对
+    keys_to_rename = {}
+    # 获取配置信息
+    base_nc = ckpt['model'].yaml.get('base_nc', 60)  # 默认base_nc为60
+    nc = ckpt['model'].yaml.get('nc', 80)  # 默认nc为80
+    print(f"配置信息: base_nc={base_nc}, nc={nc}")
+    
+    for k in list(state_dict.keys()):
+        key_parts = k.split('.')
+        
+        # 检查是否是cv3层且在目标layer_id中
+        if (len(key_parts) >= 3 and 
+            key_parts[2] == 'cv3' and 
+            int(key_parts[1]) in dfl_layer_ids):
+            # 将cv3替换为base_cv3
+            new_key_parts = key_parts.copy()
+            new_key_parts[2] = 'base_cv3'
+            new_key = '.'.join(new_key_parts)
+            keys_to_rename[k] = new_key
+    
+    # 4. 执行重命名
+    for old_key, new_key in keys_to_rename.items():
+        if old_key in state_dict:
+            state_dict[new_key] = state_dict.pop(old_key)
+            print(f"重命名: {old_key} -> {new_key}")
+    
+    # 加载修改后的权重
+    missing_keys, unexpected_keys = new_model.load_state_dict(state_dict, strict=False)
+    
+    if missing_keys:
+        print(f"缺失的键: {missing_keys}")
+    if unexpected_keys:
+        print(f"意外的键: {unexpected_keys}")
+    
+    # 更新检查点
+    ckpt['model'] = new_model
+    print("模型重建完成！")
+    return ckpt
 
 def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     """Parse a YOLO model.yaml dictionary into a PyTorch model."""
