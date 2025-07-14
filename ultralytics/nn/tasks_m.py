@@ -559,6 +559,17 @@ class DetectionModel_m(BaseModel_m):
                 m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s))])  # forward
             self.stride = m.stride
             m.bias_init()  # only run once
+        elif isinstance(m, ReDetect):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
+            s = 256  # 2x min stride
+            m.inplace = self.inplace
+            forward = lambda x: self.forward(x, x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.forward(x, x)
+            if self.modal == 'both':
+                m.stride = torch.tensor([s / x.shape[-2] for x in (forward(torch.zeros(1, ch, s, s)))[-1]])
+                # print(m.stride)
+            else:
+                m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s))])  # forward
+            self.stride = m.stride
+            m.bias_init()  # only run once
         else:
             self.stride = torch.Tensor([32])  # default stride for i.e. RTDETR
 
@@ -614,8 +625,8 @@ class DetectionModel_m(BaseModel_m):
 
     def init_criterion(self):
         """Initialize the loss criterion for the DetectionModel."""
-        print(f"是否启用增量损失：{self.is_incremental}")
-        return v8DetectionLoss(self,self.is_incremental)
+        #print(f"是否启用增量损失：{self.is_incremental}")
+        return v8DetectionLoss(self,self.is_incremental,self.base_nc)
 
 # # TODO：这里等等看要不要增量
 # class IncrementalDetectionModel_m(DetectionModel_m):

@@ -147,7 +147,7 @@ class KeypointLoss(nn.Module):
 class v8DetectionLoss:
     """Criterion class for computing training losses."""
 
-    def __init__(self, model,is_incremental=False):  # model must be de-paralleled
+    def __init__(self, model,is_incremental=False,base_nc=0):  # model must be de-paralleled
         """Initializes v8DetectionLoss with the model, defining model-related properties and BCE loss function."""
         device = next(model.parameters()).device  # get model device
         h = model.args  # hyperparameters
@@ -170,6 +170,7 @@ class v8DetectionLoss:
         self.bbox_loss = BboxLoss(m.reg_max - 1, use_dfl=self.use_dfl).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
         self.is_incremental = is_incremental
+        self.base_nc = base_nc
 
     def preprocess(self, targets, batch_size, scale_tensor):
         """Preprocesses the target counts and matches with the input batch size to output a tensor."""
@@ -227,13 +228,13 @@ class v8DetectionLoss:
                     tmp_loss = torch.zeros(4, device=self.device)
                 else:
                     tmp_loss = torch.zeros(3, device=self.device)
-                print(f'i is {i}')
-                print(f'preds is {preds}')
+                # print(f'i is {i}')
+                # print(f'preds is {preds}')
                 if isinstance(preds[i], tuple):
                     feats = preds[i][1]
-                elif isinstance(preds[i], dict):
-                    feats = preds[i]['x']
-                    base_nc = preds[i]['base_nc']
+                # elif isinstance(preds[i], dict):
+                #     feats = preds[i]['x']
+                #     base_nc = preds[i]['base_nc']
                 else:
                     feats = preds[i]
                 # print(feats[0].shape)
@@ -242,9 +243,9 @@ class v8DetectionLoss:
                 if self.is_incremental:
                     tmp_pred_feat = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats],2)
                     pred_distri=tmp_pred_feat[:, :self.reg_max*4, :]
-                    base_scores=tmp_pred_feat[:, self.reg_max*4:self.reg_max*4+base_nc, :]
+                    base_scores=tmp_pred_feat[:, self.reg_max*4:self.reg_max*4+self.base_nc, :]
                     base_scores=base_scores.permute(0,2,1).contiguous() # (Tensor): shape(bs, num_total_anchors, num_classes)
-                    pred_scores=tmp_pred_feat[:, self.reg_max*4+base_nc:, :]
+                    pred_scores=tmp_pred_feat[:, self.reg_max*4+self.base_nc:, :]
                 else:
                     pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats],
                                                         2).split(
@@ -292,8 +293,8 @@ class v8DetectionLoss:
                 if self.is_incremental:
                     # KL损失：保证pred_scores和base_scores的前base_nc个类别的预测值尽可能相似
                     # 对base_scores和pred_scores的前base_nc个类别进行sigmoid
-                    base_scores_sigmoid = torch.sigmoid(base_scores[:, :, :base_nc])  # (bs, num_total_anchors, base_nc)
-                    pred_scores_sigmoid = torch.sigmoid(pred_scores[:, :, :base_nc])  # (bs, num_total_anchors, base_nc)
+                    base_scores_sigmoid = torch.sigmoid(base_scores[:, :, :self.base_nc])  # (bs, num_total_anchors, base_nc)
+                    pred_scores_sigmoid = torch.sigmoid(pred_scores[:, :, :self.base_nc])  # (bs, num_total_anchors, base_nc)
                     
                     # 计算KL散度损失
                     # 使用KLDivLoss，需要将target转换为log形式

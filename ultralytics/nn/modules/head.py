@@ -145,7 +145,8 @@ class ReDetect(nn.Module):
         #TODO:第二部分，确定输出的情况方便后续loss计算，目前输出元组（？）然后再loss里面分辨novel和base做蒸馏损失
         if self.training:  # Training path
             # print(f"ReDetect 输出x: {x}")
-            return {'x': x, 'base_nc': self.base_nc}
+            #return {'x': x, 'base_nc': self.base_nc}
+            return x
 
         #TODO:第三部分，推理阶段，融合base和novel的推理结果，考虑引入bonus值
         # Inference path
