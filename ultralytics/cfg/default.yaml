@@ -45,6 +45,9 @@ dropout: 0.0 # (float) use dropout regularization (classify train only)
 r_init: 9
 r_target: 6
 adalora: False
+teacher: None
+distillation_loss: None
+distill_layers: [6]
 
 # Val/Test settings ----------------------------------------------------------------------------------------------------
 val: True # (bool) validate/test during training

@@ -98,12 +98,14 @@ class MGDLoss(nn.Module):
                  alpha_mgd=0.00002,
                  lambda_mgd=0.65,
                  ):
-        #对 student 特征做随机 mask，然后用一个小的生成器（两个 3x3 卷积）恢复特征，最后用 MSELoss 让恢复后的特征和 teacher 特征尽量接近。
+        # 对 student 特征做随机 mask，然后用一个小的生成器（两个 3x3 卷积）恢复特征，最后用 MSELoss 让恢复后的特征和 teacher 特征尽量接近。
         super(MGDLoss, self).__init__()
         self.alpha_mgd = alpha_mgd
         self.lambda_mgd = lambda_mgd
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
+        
+        # 注意：这里的 student_channels 和 teacher_channels 应该是展平后的列表长度
+        # 但由于生成器是按层创建的，所以这里的逻辑保持不变，由上层 FeatureLoss 保证索引正确
         self.generation = nn.ModuleList([
             nn.Sequential(
                 nn.Conv2d(channel, channel, kernel_size=3, padding=1),
@@ -123,17 +125,20 @@ class MGDLoss(nn.Module):
             torch.Tensor: The calculated loss value of all stages.
         """
         losses = []
+        # 注意：这里的idx不再与原始层直接对应，而是展平后列表的索引
+        # 但 get_dis_loss 内部的 self.generation[idx] 期望的是原始层的索引
+        # 我们将在 FeatureLoss 中处理好这个问题，这里假设传入的 y_s, y_t 已经完全对齐
         for idx, (s, t) in enumerate(zip(y_s, y_t)):
-            # print(s.shape)
-            # print(t.shape)
-            # assert s.shape == t.shape
-            if layer == "outlayer":
-                idx = -1
+            # 在新的 FeatureLoss 中，我们传递的是处理好的特征，所以不需要再通过 idx 找生成器
+            # 我们将修改 get_dis_loss，直接接收生成器
+            # 为了保持 MGDLoss 的通用性，我们还是通过 FeatureLoss 传入正确的生成器
+            # 这里的实现假设 FeatureLoss 会处理好一切
             losses.append(self.get_dis_loss(s, t, idx) * self.alpha_mgd)
         loss = sum(losses)
         return loss
 
     def get_dis_loss(self, preds_S, preds_T, idx):
+        # 此处的idx应对应正确的generation模块，FeatureLoss会保证这一点
         loss_mse = nn.MSELoss(reduction='sum')
         N, C, H, W = preds_T.shape
 
@@ -142,11 +147,76 @@ class MGDLoss(nn.Module):
         mat = torch.where(mat > 1 - self.lambda_mgd, 0, 1).to(device)
 
         masked_fea = torch.mul(preds_S, mat)
+        
+        # 假设 idx 已经由 FeatureLoss 修正，指向正确的生成器
+        # 如果 FeatureLoss 传入的 y_s 和 y_t 是展平的，那么MGDLoss的 generation 也应该对应展平的特征
+        # 一个更好的方法是修改 FeatureLoss，让它直接调用 get_dis_loss
         new_fea = self.generation[idx](masked_fea)
 
         dis_loss = loss_mse(new_fea, preds_T) / N
         return dis_loss
 
+# class FeatureLoss(nn.Module):
+#     def __init__(self, channels_s, channels_t, distiller='mgd', loss_weight=1.0):
+#         super(FeatureLoss, self).__init__()
+#         self.loss_weight = loss_weight
+#         self.distiller = distiller
+        
+#         # Move all modules to same precision
+#         device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        
+#         # Convert to ModuleList and ensure consistent dtype
+#         self.align_module = nn.ModuleList()
+#         self.norm = nn.ModuleList()
+#         self.norm1 = nn.ModuleList()
+        
+#         # Create alignment modules
+#         for s_chan, t_chan in zip(channels_s, channels_t):
+#             align = nn.Sequential(
+#                 nn.Conv2d(s_chan, t_chan, kernel_size=1, stride=1, padding=0),
+#                 nn.BatchNorm2d(t_chan, affine=False)
+#             ).to(device)
+#             self.align_module.append(align)
+            
+#         # Create normalization layers
+#         for t_chan in channels_t:
+#             self.norm.append(nn.BatchNorm2d(t_chan, affine=False).to(device))
+            
+#         for s_chan in channels_s:
+#             self.norm1.append(nn.BatchNorm2d(s_chan, affine=False).to(device))
+
+#         if distiller == 'mgd':
+#             self.feature_loss = MGDLoss(channels_s, channels_t)
+#         elif distiller == 'cwd':
+#             self.feature_loss = CWDLoss(channels_s, channels_t)
+#         else:
+#             raise NotImplementedError
+
+#     def forward(self, y_s, y_t):
+#         if len(y_s) != len(y_t):
+#             y_t = y_t[len(y_t) // 2:]
+
+#         tea_feats = []
+#         stu_feats = []
+
+#         for idx, (s, t) in enumerate(zip(y_s, y_t)):
+#             # Match input dtype to module dtype
+#             s = s.type(next(self.align_module[idx].parameters()).dtype)
+#             t = t.type(next(self.align_module[idx].parameters()).dtype)
+            
+#             if self.distiller == "cwd":
+#                 # Apply alignment and normalization
+#                 s = self.align_module[idx](s)
+#                 stu_feats.append(s)
+#                 tea_feats.append(t.detach())
+#             else:
+#                 # Apply normalization
+#                 t = self.norm1[idx](t)
+#                 stu_feats.append(s)
+#                 tea_feats.append(t.detach())
+
+#         loss = self.feature_loss(stu_feats, tea_feats)
+#         return self.loss_weight * loss
 
 class FeatureLoss(nn.Module):
     def __init__(self, channels_s, channels_t, distiller='mgd', loss_weight=1.0):
@@ -154,15 +224,14 @@ class FeatureLoss(nn.Module):
         self.loss_weight = loss_weight
         self.distiller = distiller
         
-        # Move all modules to same precision
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         
-        # Convert to ModuleList and ensure consistent dtype
         self.align_module = nn.ModuleList()
         self.norm = nn.ModuleList()
         self.norm1 = nn.ModuleList()
         
-        # Create alignment modules
+        # 创建对齐模块（通常用于 student）
+        # 这里的 channels_s 和 channels_t 对应的是原始的、未展平的层
         for s_chan, t_chan in zip(channels_s, channels_t):
             align = nn.Sequential(
                 nn.Conv2d(s_chan, t_chan, kernel_size=1, stride=1, padding=0),
@@ -170,46 +239,108 @@ class FeatureLoss(nn.Module):
             ).to(device)
             self.align_module.append(align)
             
-        # Create normalization layers
+        # 创建归一化层 (通常用于 teacher)
         for t_chan in channels_t:
             self.norm.append(nn.BatchNorm2d(t_chan, affine=False).to(device))
             
+        # 创建另一个归一化层 (MGD 中用到)
         for s_chan in channels_s:
             self.norm1.append(nn.BatchNorm2d(s_chan, affine=False).to(device))
 
         if distiller == 'mgd':
+            # MGDLoss 的 generation 模块是与 teacher 的层一一对应的
             self.feature_loss = MGDLoss(channels_s, channels_t)
         elif distiller == 'cwd':
+            # CWDLoss 不需要额外的模块，所以初始化是安全的
             self.feature_loss = CWDLoss(channels_s, channels_t)
         else:
             raise NotImplementedError
 
     def forward(self, y_s, y_t):
+        """
+        处理 student 和 teacher 的特征输出，这些输出可能是 Tensor 或 Tuple[Tensor, ...]。
+        """
+        # 如果 teacher 的输出是 student 的两倍（例如，在检测任务中，neck的输出可能是多尺度的）
+        # 这段逻辑可能需要根据您的具体模型结构调整
         if len(y_s) != len(y_t):
+            # 这是一个特定于某些检测模型的逻辑，您可能需要保留或删除
             y_t = y_t[len(y_t) // 2:]
 
-        tea_feats = []
-        stu_feats = []
+        # 展平后的特征列表
+        flat_stu_feats = []
+        flat_tea_feats = []
+        # 用于追踪每个展平特征对应的原始层索引，以便使用正确的 align_module
+        align_indices = []
 
-        for idx, (s, t) in enumerate(zip(y_s, y_t)):
-            # Match input dtype to module dtype
-            s = s.type(next(self.align_module[idx].parameters()).dtype)
-            t = t.type(next(self.align_module[idx].parameters()).dtype)
+        # 遍历每一对（可能未对齐的）层输出
+        for layer_idx, (s_out, t_out) in enumerate(zip(y_s, y_t)):
+            # 检查输出是否为元组或列表
+            if isinstance(s_out, (tuple, list)):
+                # 如果学生输出是元组，老师输出也必须是
+                assert isinstance(t_out, (tuple, list)), \
+                    f"Student output at layer {layer_idx} is a tuple, but teacher's is not."
+                assert len(s_out) == len(t_out), \
+                    f"Mismatched tuple size at layer {layer_idx}."
+                
+                # 遍历元组内的每个特征 (例如，rgb_feat, ir_feat)
+                for s_feat, t_feat in zip(s_out, t_out):
+                    flat_stu_feats.append(s_feat)
+                    flat_tea_feats.append(t_feat)
+                    # 多个子特征共享同一个原始层的对齐模块
+                    align_indices.append(layer_idx)
+            else:
+                # 如果输出是单个张量
+                flat_stu_feats.append(s_out)
+                flat_tea_feats.append(t_out)
+                align_indices.append(layer_idx)
+
+        # 准备最终送入损失函数的特征列表
+        final_stu_feats = []
+        final_tea_feats = []
+
+        for i in range(len(flat_stu_feats)):
+            s, t = flat_stu_feats[i], flat_tea_feats[i]
+            # 获取该特征对应的原始层索引
+            original_layer_idx = align_indices[i]
+
+            # 确保数据类型一致
+            s = s.type(next(self.align_module[original_layer_idx].parameters()).dtype)
+            t = t.type(next(self.align_module[original_layer_idx].parameters()).dtype)
             
             if self.distiller == "cwd":
-                # Apply alignment and normalization
-                s = self.align_module[idx](s)
-                stu_feats.append(s)
-                tea_feats.append(t.detach())
-            else:
-                # Apply normalization
-                t = self.norm1[idx](t)
-                stu_feats.append(s)
-                tea_feats.append(t.detach())
+                # 对学生特征进行通道对齐
+                s = self.align_module[original_layer_idx](s)
+                final_stu_feats.append(s)
+                final_tea_feats.append(t.detach())
+            else: # for mgd
+                # 对教师特征进行归一化
+                # 注意：原始代码对教师特征用了 norm1，这似乎是基于学生通道数的BN，可能需要确认
+                # 这里我们假设 MGD 蒸馏前不需要对齐，而是直接比较
+                t = self.norm[original_layer_idx](t)
+                final_stu_feats.append(s)
+                final_tea_feats.append(t.detach())
 
-        loss = self.feature_loss(stu_feats, tea_feats)
+        # ==================== 特别注意 MGDLoss 的处理 ====================
+        # MGDLoss 的 get_dis_loss 内部使用了 self.generation[idx]。
+        # 这个 idx 是基于列表的索引，但我们的列表已经被展平了。
+        # 正确的做法是，我们应该在这里直接调用 get_dis_loss，并传入正确的 generation 模块。
+        if self.distiller == 'mgd':
+            total_loss = 0
+            for i in range(len(final_stu_feats)):
+                s, t = final_stu_feats[i], final_tea_feats[i]
+                # 获取正确的原始层索引，从而找到对应的 generation 模块
+                original_layer_idx = align_indices[i]
+                
+                # 直接调用 MGDLoss 的子函数，并传入正确的生成器索引
+                loss = self.feature_loss.get_dis_loss(s, t, original_layer_idx)
+                total_loss += loss * self.feature_loss.alpha_mgd
+            
+            loss = total_loss
+        else:
+            # 对于 CWDLoss，它的计算不依赖于额外的模块，所以可以直接调用
+            loss = self.feature_loss(final_stu_feats, final_tea_feats)
+        
         return self.loss_weight * loss
-
 
 class DistillationLoss:
     def __init__(self, models, modelt, imgsz=800,layers=["6", "8", "13", "16", "19", "22"], distiller="CWDLoss"):
@@ -222,8 +353,8 @@ class DistillationLoss:
         # ini warm up
         with torch.no_grad():
             dummy_input = torch.randn(1, 3, imgsz, imgsz)
-            _ = self.models(dummy_input.to(device))
-            _ = self.modelt(dummy_input.to(device))
+            _ = self.models(dummy_input.to(device),dummy_input.to(device))
+            _ = self.modelt(dummy_input.to(device),dummy_input.to(device))
         
         self.channels_s = []
         self.channels_t = []
@@ -236,7 +367,7 @@ class DistillationLoss:
         self.distill_loss_fn = FeatureLoss(
             channels_s=self.channels_s, 
             channels_t=self.channels_t, 
-            distiller=distiller[:3]
+            distiller=distiller[:3] #通过这个命名
         )
         
     def _find_layers(self):
@@ -282,32 +413,29 @@ class DistillationLoss:
         self.student_module_pairs = self.student_module_pairs[-nl:]
 
     def register_hook(self):
-        # Remove the existing hook if they exist
         self.remove_handle_()
         
         self.teacher_outputs = []
         self.student_outputs = []
 
-        def make_student_hook(l):
-            def forward_hook(m, input, output):
-                if isinstance(output, torch.Tensor):
-                    out = output.clone()  # Clone to ensure we don't modify the original
-                    l.append(out)
+        # Hook函数可以正确处理Tensor和Tuple的输出
+        def make_hook(output_list, detach=False):
+            def forward_hook(module, input, output):
+                if detach:
+                    if isinstance(output, torch.Tensor):
+                        output_list.append(output.detach().clone())
+                    elif isinstance(output, (tuple, list)):
+                        output_list.append([o.detach().clone() if isinstance(o, torch.Tensor) else o for o in output])
                 else:
-                    l.append([o.clone() if isinstance(o, torch.Tensor) else o for o in output])
+                    if isinstance(output, torch.Tensor):
+                        output_list.append(output.clone())
+                    elif isinstance(output, (tuple, list)):
+                        output_list.append([o.clone() if isinstance(o, torch.Tensor) else o for o in output])
             return forward_hook
 
-        def make_teacher_hook(l):
-            def forward_hook(m, input, output):
-                if isinstance(output, torch.Tensor):
-                    l.append(output.detach().clone())  # Detach and clone teacher outputs
-                else:
-                    l.append([o.detach().clone() if isinstance(o, torch.Tensor) else o for o in output])
-            return forward_hook
-
-        for ml, ori in zip(self.teacher_module_pairs, self.student_module_pairs):
-            self.remove_handle.append(ml.register_forward_hook(make_teacher_hook(self.teacher_outputs)))
-            self.remove_handle.append(ori.register_forward_hook(make_student_hook(self.student_outputs)))
+        for ml_t, ml_s in zip(self.teacher_module_pairs, self.student_module_pairs):
+            self.remove_handle.append(ml_t.register_forward_hook(make_hook(self.teacher_outputs, detach=True)))
+            self.remove_handle.append(ml_s.register_forward_hook(make_hook(self.student_outputs, detach=False)))
 
     def get_loss(self):
         if not self.teacher_outputs or not self.student_outputs:
@@ -664,14 +792,17 @@ class BaseTrainer_m:
         if overrides:
             self.teacher = overrides.get("teacher", None)
             self.loss_type = overrides.get("distillation_loss", None)
+            self.distill_layers = overrides.get("distill_layers", None)
             if "teacher" in overrides:
                 overrides.pop("teacher")
             if "distillation_loss" in overrides:
                 overrides.pop("distillation_loss")
+            if "distill_layers" in overrides:
+                overrides.pop("distill_layers")
         else:
             self.loss_type = None
             self.teacher = None
-
+            self.distill_layers = None
         init_seeds(self.args.seed + 1 + RANK, deterministic=self.args.deterministic)
 
         # Dirs
@@ -953,7 +1084,7 @@ class BaseTrainer_m:
         #TODO：蒸馏第四处实现
         # make loss
         if self.teacher is not None:
-            distillation_loss = DistillationLoss(self.model, self.teacher, distiller=self.loss_type)
+            distillation_loss = DistillationLoss(self.model, self.teacher,layers=self.distill_layers, distiller=self.loss_type)
         epoch = self.start_epoch
         while True:
             self.epoch = epoch
