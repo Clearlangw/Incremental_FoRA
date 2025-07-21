@@ -5,7 +5,7 @@ Train a model on a dataset.
 Usage:
     $ yolo mode=train model=yolov8n.pt data=coco128.yaml imgsz=640 epochs=100 batch=16
 """
-
+import gc
 import math
 import os
 import subprocess
@@ -50,7 +50,287 @@ from ultralytics.utils.torch_utils import (
     strip_optimizer,
 )
 
+import torch.nn.functional as F
 
+#特征蒸馏这一块
+class CWDLoss(nn.Module):
+    """PyTorch version of `Channel-wise Distillation for Semantic Segmentation.
+    <https://arxiv.org/abs/2011.13256>`_.
+    """
+    #对每个通道做 softmax，然后用 KL 散度度量 student 和 teacher 的通道分布差异。
+    def __init__(self, channels_s, channels_t, tau=1.0):
+        super().__init__()
+        self.tau = tau
+
+    def forward(self, y_s, y_t):
+        """Forward computation.
+        Args:
+            y_s (list): The student model prediction with
+                shape (N, C, H, W) in list.
+            y_t (list): The teacher model prediction with
+                shape (N, C, H, W) in list.
+        Return:
+            torch.Tensor: The calculated loss value of all stages.
+        """
+        assert len(y_s) == len(y_t)
+        losses = []
+
+        for idx, (s, t) in enumerate(zip(y_s, y_t)):
+            assert s.shape == t.shape
+            N, C, H, W = s.shape
+
+            # normalize in channel dimension
+            softmax_pred_T = F.softmax(t.view(-1, W * H) / self.tau, dim=1)
+
+            logsoftmax = torch.nn.LogSoftmax(dim=1)
+            cost = torch.sum(
+                softmax_pred_T * logsoftmax(t.view(-1, W * H) / self.tau) -
+                softmax_pred_T * logsoftmax(s.view(-1, W * H) / self.tau)) * (self.tau ** 2)
+
+            losses.append(cost / (C * N))
+        loss = sum(losses)
+        return loss
+
+class MGDLoss(nn.Module):
+    def __init__(self,
+                 student_channels,
+                 teacher_channels,
+                 alpha_mgd=0.00002,
+                 lambda_mgd=0.65,
+                 ):
+        #对 student 特征做随机 mask，然后用一个小的生成器（两个 3x3 卷积）恢复特征，最后用 MSELoss 让恢复后的特征和 teacher 特征尽量接近。
+        super(MGDLoss, self).__init__()
+        self.alpha_mgd = alpha_mgd
+        self.lambda_mgd = lambda_mgd
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+        self.generation = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(channel, channel, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(channel, channel, kernel_size=3, padding=1)
+            ).to(device) for channel in teacher_channels
+        ])
+
+    def forward(self, y_s, y_t, layer=None):
+        """Forward computation.
+        Args:
+            y_s (list): The student model prediction with
+                shape (N, C, H, W) in list.
+            y_t (list): The teacher model prediction with
+                shape (N, C, H, W) in list.
+        Return:
+            torch.Tensor: The calculated loss value of all stages.
+        """
+        losses = []
+        for idx, (s, t) in enumerate(zip(y_s, y_t)):
+            # print(s.shape)
+            # print(t.shape)
+            # assert s.shape == t.shape
+            if layer == "outlayer":
+                idx = -1
+            losses.append(self.get_dis_loss(s, t, idx) * self.alpha_mgd)
+        loss = sum(losses)
+        return loss
+
+    def get_dis_loss(self, preds_S, preds_T, idx):
+        loss_mse = nn.MSELoss(reduction='sum')
+        N, C, H, W = preds_T.shape
+
+        device = preds_S.device
+        mat = torch.rand((N, 1, H, W)).to(device)
+        mat = torch.where(mat > 1 - self.lambda_mgd, 0, 1).to(device)
+
+        masked_fea = torch.mul(preds_S, mat)
+        new_fea = self.generation[idx](masked_fea)
+
+        dis_loss = loss_mse(new_fea, preds_T) / N
+        return dis_loss
+
+
+class FeatureLoss(nn.Module):
+    def __init__(self, channels_s, channels_t, distiller='mgd', loss_weight=1.0):
+        super(FeatureLoss, self).__init__()
+        self.loss_weight = loss_weight
+        self.distiller = distiller
+        
+        # Move all modules to same precision
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        
+        # Convert to ModuleList and ensure consistent dtype
+        self.align_module = nn.ModuleList()
+        self.norm = nn.ModuleList()
+        self.norm1 = nn.ModuleList()
+        
+        # Create alignment modules
+        for s_chan, t_chan in zip(channels_s, channels_t):
+            align = nn.Sequential(
+                nn.Conv2d(s_chan, t_chan, kernel_size=1, stride=1, padding=0),
+                nn.BatchNorm2d(t_chan, affine=False)
+            ).to(device)
+            self.align_module.append(align)
+            
+        # Create normalization layers
+        for t_chan in channels_t:
+            self.norm.append(nn.BatchNorm2d(t_chan, affine=False).to(device))
+            
+        for s_chan in channels_s:
+            self.norm1.append(nn.BatchNorm2d(s_chan, affine=False).to(device))
+
+        if distiller == 'mgd':
+            self.feature_loss = MGDLoss(channels_s, channels_t)
+        elif distiller == 'cwd':
+            self.feature_loss = CWDLoss(channels_s, channels_t)
+        else:
+            raise NotImplementedError
+
+    def forward(self, y_s, y_t):
+        if len(y_s) != len(y_t):
+            y_t = y_t[len(y_t) // 2:]
+
+        tea_feats = []
+        stu_feats = []
+
+        for idx, (s, t) in enumerate(zip(y_s, y_t)):
+            # Match input dtype to module dtype
+            s = s.type(next(self.align_module[idx].parameters()).dtype)
+            t = t.type(next(self.align_module[idx].parameters()).dtype)
+            
+            if self.distiller == "cwd":
+                # Apply alignment and normalization
+                s = self.align_module[idx](s)
+                stu_feats.append(s)
+                tea_feats.append(t.detach())
+            else:
+                # Apply normalization
+                t = self.norm1[idx](t)
+                stu_feats.append(s)
+                tea_feats.append(t.detach())
+
+        loss = self.feature_loss(stu_feats, tea_feats)
+        return self.loss_weight * loss
+
+
+class DistillationLoss:
+    def __init__(self, models, modelt, imgsz=800,layers=["6", "8", "13", "16", "19", "22"], distiller="CWDLoss"):
+        self.distiller = distiller
+        self.layers = layers
+        self.models = models 
+        self.modelt = modelt
+
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        # ini warm up
+        with torch.no_grad():
+            dummy_input = torch.randn(1, 3, imgsz, imgsz)
+            _ = self.models(dummy_input.to(device))
+            _ = self.modelt(dummy_input.to(device))
+        
+        self.channels_s = []
+        self.channels_t = []
+        self.teacher_module_pairs = []
+        self.student_module_pairs = []
+        self.remove_handle = []
+        
+        self._find_layers()
+        
+        self.distill_loss_fn = FeatureLoss(
+            channels_s=self.channels_s, 
+            channels_t=self.channels_t, 
+            distiller=distiller[:3]
+        )
+        
+    def _find_layers(self):
+
+        self.channels_s = []
+        self.channels_t = []
+        self.teacher_module_pairs = []
+        self.student_module_pairs = []
+        modelt = self.modelt.module if hasattr(self.modelt, "module") else self.modelt
+        models = self.models.module if hasattr(self.models, "module") else self.models
+        
+        for name, ml in modelt.named_modules():
+            if name is not None:
+                name = name.split(".")
+                # print(name)
+                
+                if name[0] != "model":
+                    continue
+                if len(name) >= 3:
+                    if name[1] in self.layers:
+                        if "cv2" in name[2]:
+                            if hasattr(ml, 'conv'):
+                                self.channels_t.append(ml.conv.out_channels)
+                                self.teacher_module_pairs.append(ml)
+        # print()
+        for name, ml in models.named_modules():
+            if name is not None:
+                name = name.split(".")
+                # print(name)
+                if name[0] != "model":
+                    continue
+                if len(name) >= 3:
+                    if name[1] in self.layers:
+                        if "cv2" in name[2]:
+                            if hasattr(ml, 'conv'):
+                                self.channels_s.append(ml.conv.out_channels)
+                                self.student_module_pairs.append(ml)
+
+        nl = min(len(self.channels_s), len(self.channels_t))
+        self.channels_s = self.channels_s[-nl:]
+        self.channels_t = self.channels_t[-nl:]
+        self.teacher_module_pairs = self.teacher_module_pairs[-nl:]
+        self.student_module_pairs = self.student_module_pairs[-nl:]
+
+    def register_hook(self):
+        # Remove the existing hook if they exist
+        self.remove_handle_()
+        
+        self.teacher_outputs = []
+        self.student_outputs = []
+
+        def make_student_hook(l):
+            def forward_hook(m, input, output):
+                if isinstance(output, torch.Tensor):
+                    out = output.clone()  # Clone to ensure we don't modify the original
+                    l.append(out)
+                else:
+                    l.append([o.clone() if isinstance(o, torch.Tensor) else o for o in output])
+            return forward_hook
+
+        def make_teacher_hook(l):
+            def forward_hook(m, input, output):
+                if isinstance(output, torch.Tensor):
+                    l.append(output.detach().clone())  # Detach and clone teacher outputs
+                else:
+                    l.append([o.detach().clone() if isinstance(o, torch.Tensor) else o for o in output])
+            return forward_hook
+
+        for ml, ori in zip(self.teacher_module_pairs, self.student_module_pairs):
+            self.remove_handle.append(ml.register_forward_hook(make_teacher_hook(self.teacher_outputs)))
+            self.remove_handle.append(ori.register_forward_hook(make_student_hook(self.student_outputs)))
+
+    def get_loss(self):
+        if not self.teacher_outputs or not self.student_outputs:
+            return torch.tensor(0.0, requires_grad=True)
+        
+        if len(self.teacher_outputs) != len(self.student_outputs):
+            print(f"Warning: Mismatched outputs - Teacher: {len(self.teacher_outputs)}, Student: {len(self.student_outputs)}")
+            return torch.tensor(0.0, requires_grad=True)
+        
+        quant_loss = self.distill_loss_fn(y_s=self.student_outputs, y_t=self.teacher_outputs)
+        
+        if self.distiller != 'cwd':
+            quant_loss *= 0.3
+
+        self.teacher_outputs.clear()
+        self.student_outputs.clear()
+        
+        return quant_loss
+
+    def remove_handle_(self):
+        for rm in self.remove_handle:
+            rm.remove()
+        self.remove_handle.clear()
 
 class RankAllocator(object):
     """
@@ -158,7 +438,10 @@ class RankAllocator(object):
             mul_coeff = 1-(step-initial_warmup)/(total_step-final_warmup-initial_warmup)
             curr_rank = target_rank + (self.total_rank-target_rank)*(mul_coeff**3)
             curr_rank = int(curr_rank)
-            mask_ind = True if step % self.mask_interval == 0 else False 
+            if self.mask_interval == 0:
+                mask_ind = True
+            else:
+                mask_ind = True if step % self.mask_interval == 0 else False 
         return curr_rank, mask_ind 
 
 
@@ -377,6 +660,18 @@ class BaseTrainer_m:
         self.validator = None
         self.metrics = None
         self.plots = {}
+        #TODO：蒸馏第一处实现
+        if overrides:
+            self.teacher = overrides.get("teacher", None)
+            self.loss_type = overrides.get("distillation_loss", None)
+            if "teacher" in overrides:
+                overrides.pop("teacher")
+            if "distillation_loss" in overrides:
+                overrides.pop("distillation_loss")
+        else:
+            self.loss_type = None
+            self.teacher = None
+
         init_seeds(self.args.seed + 1 + RANK, deterministic=self.args.deterministic)
 
         # Dirs
@@ -512,6 +807,12 @@ class BaseTrainer_m:
         self.run_callbacks("on_pretrain_routine_start")
         ckpt = self.setup_model()
         self.model = self.model.to(self.device)
+        #TODO：蒸馏第二处实现
+        # Load teacher model to device
+        if self.teacher is not None:
+            for k, v in self.teacher.named_parameters():
+                v.requires_grad = True
+            self.teacher = self.teacher.to(self.device)
         self.set_model_attributes()
 
         # Freeze layers
@@ -522,7 +823,8 @@ class BaseTrainer_m:
             if isinstance(self.args.freeze, int)
             else []
         )
-        always_freeze_names = [".dfl"]  # always freeze these layers
+        always_freeze_names = [".dfl",".base_cv3"]  # always freeze these layers
+        # always_freeze_names = []
         freeze_layer_names = [f"model.{x}." for x in freeze_list] + always_freeze_names
         for k, v in self.model.named_parameters():
             # v.register_hook(lambda x: torch.nan_to_num(x))  # NaN to 0 (commented for erratic training results)
@@ -581,8 +883,18 @@ class BaseTrainer_m:
         self.accumulate = max(round(self.args.nbs / self.batch_size), 1)  # accumulate loss before optimizing
         weight_decay = self.args.weight_decay * self.batch_size * self.accumulate / self.args.nbs  # scale weight_decay
         iterations = math.ceil(len(self.train_loader.dataset) / max(self.batch_size, self.args.nbs)) * self.epochs
+        # self.optimizer = self.build_optimizer(
+        #     model=self.model,
+        #     name=self.args.optimizer,
+        #     lr=self.args.lr0,
+        #     momentum=self.args.momentum,
+        #     decay=weight_decay,
+        #     iterations=iterations,
+        # )
+        #TODO：蒸馏第三处实现
         self.optimizer = self.build_optimizer(
             model=self.model,
+            teacher=self.teacher,
             name=self.args.optimizer,
             lr=self.args.lr0,
             momentum=self.args.momentum,
@@ -600,6 +912,8 @@ class BaseTrainer_m:
         """Train completed, evaluate and plot if specified by arguments."""
         if world_size > 1:
             self._setup_ddp(world_size)
+        # import pdb
+        # pdb.set_trace()
         self._setup_train(world_size)
 
         nb = len(self.train_loader)  # number of batches
@@ -636,11 +950,15 @@ class BaseTrainer_m:
         if self.args.close_mosaic:
             base_idx = (self.epochs - self.args.close_mosaic) * nb
             self.plot_idx.extend([base_idx, base_idx + 1, base_idx + 2])
+        #TODO：蒸馏第四处实现
+        # make loss
+        if self.teacher is not None:
+            distillation_loss = DistillationLoss(self.model, self.teacher, distiller=self.loss_type)
         epoch = self.start_epoch
         while True:
             self.epoch = epoch
             self.run_callbacks("on_train_epoch_start")
-            self.model.train()
+            self.model.train() #<class 'ultralytics.nn.tasks_m.DetectionModel_m'>
             if RANK != -1:
                 self.train_loader.sampler.set_epoch(epoch)
             pbar = enumerate(self.train_loader)
@@ -654,6 +972,10 @@ class BaseTrainer_m:
                 pbar = TQDM(enumerate(self.train_loader), total=nb)
             self.tloss = None
             self.optimizer.zero_grad()
+            #TODO：蒸馏第五处实现
+            if self.teacher is not None:
+                distillation_loss.register_hook()
+            
             for i, batch in pbar:
                 self.run_callbacks("on_train_batch_start")
                 # Warmup
@@ -678,6 +1000,16 @@ class BaseTrainer_m:
                     self.tloss = (
                         (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None else self.loss_items
                     )
+                #TODO：蒸馏第六处实现
+                # Add more distillation logic
+                if self.teacher is not None:
+                    distill_weight = ((1 - math.cos(i * math.pi / len(self.train_loader))) / 2) * (0.1 - 1) + 1
+                    with torch.no_grad():
+                        pred = self.teacher(batch['img_rgb'],batch['img_ir']) #TODO：这里不确定（？）不过和valid一致了
+                        
+                    self.d_loss = distillation_loss.get_loss()
+                    self.d_loss *- distill_weight
+                    self.loss += self.d_loss
 
                 # Backward
                 self.scaler.scale(self.loss).backward()
@@ -711,6 +1043,10 @@ class BaseTrainer_m:
                         self.plot_training_samples(batch, ni)
 
                 self.run_callbacks("on_train_batch_end")
+            #TODO：蒸馏第七处实现
+            # More distillation logic
+            if self.teacher is not None:
+                distillation_loss.remove_handle_()
 
             self.lr = {f"lr/pg{ir}": x["lr"] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
             self.run_callbacks("on_train_epoch_end")
@@ -767,6 +1103,10 @@ class BaseTrainer_m:
                 self.plot_metrics()
             self.run_callbacks("on_train_end")
         torch.cuda.empty_cache()
+        #TODO：蒸馏第八处实现
+        # Distill logic
+        if self.teacher is not None:
+            distillation_loss.remove_handle_()
         self.run_callbacks("teardown")
 
     def save_model(self):
@@ -1004,13 +1344,14 @@ class BaseTrainer_m:
             LOGGER.info("Closing dataloader mosaic")
             self.train_loader.dataset.close_mosaic(hyp=self.args)
 
-    def build_optimizer(self, model, name="auto", lr=0.001, momentum=0.9, decay=1e-5, iterations=1e5):
+    def build_optimizer(self, model, teacher=None, name="auto", lr=0.001, momentum=0.9, decay=1e-5, iterations=1e5):
         """
         Constructs an optimizer for the given model, based on the specified optimizer name, learning rate, momentum,
         weight decay, and number of iterations.
 
         Args:
             model (torch.nn.Module): The model for which to build an optimizer.
+            teacher (torch.nn.Module): the teacher model that will help the model to improve.
             name (str, optional): The name of the optimizer to use. If 'auto', the optimizer is selected
                 based on the number of iterations. Default: 'auto'.
             lr (float, optional): The learning rate for the optimizer. Default: 0.001.
@@ -1045,6 +1386,15 @@ class BaseTrainer_m:
                     g[1].append(param)
                 else:  # weight (with decay)
                     g[0].append(param)
+        #TODO：蒸馏第九处实现
+        if teacher is not None:
+            for v in teacher.modules():
+                if hasattr(v, 'bias') and isinstance(v.bias, nn.Parameter):
+                    g[2].append(v.bias)
+                if isinstance(v, bn):  # weight (no decay)
+                    g[1].append(v.weight)
+                elif hasattr(v, 'weight') and isinstance(v.weight, nn.Parameter):  # weight (with decay)
+                    g[0].append(v.weight)
 
         if name in ("Adam", "Adamax", "AdamW", "NAdam", "RAdam"):
             optimizer = getattr(optim, name, optim.Adam)(g[2], lr=lr, betas=(momentum, 0.999), weight_decay=0.0)

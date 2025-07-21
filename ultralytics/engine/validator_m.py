@@ -181,6 +181,8 @@ class BaseValidator_m:
             # Loss
             with dt[2]:
                 if self.training:
+                    # import pdb 
+                    # pdb.set_trace()
                     self.loss += model.loss(batch, preds)[1]
 
             # Postprocess

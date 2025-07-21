@@ -483,6 +483,10 @@ class BaseModel_m(nn.Module):
                 m.stride = fn(m.stride)
                 m.anchors = fn(m.anchors)
                 m.strides = fn(m.strides)
+            elif isinstance(m, ReDetect):
+                m.stride = fn(m.stride)
+                m.anchors = fn(m.anchors)
+                m.strides = fn(m.strides)
         return self
 
     def load(self, weights, verbose=True):
@@ -533,7 +537,7 @@ class DetectionModel_m(BaseModel_m):
         if nc and nc != self.yaml["nc"]:
             LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml["nc"] = nc  # override YAML value
-
+        self.base_nc = 0
         if self.yaml.get("base_nc", None):
             self.base_nc = self.yaml["base_nc"]
             LOGGER.info(f"Incremental model detected, base_nc: {self.base_nc}, Incremental Loss turns on")
@@ -564,10 +568,10 @@ class DetectionModel_m(BaseModel_m):
             m.inplace = self.inplace
             forward = lambda x: self.forward(x, x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.forward(x, x)
             if self.modal == 'both':
-                m.stride = torch.tensor([s / x.shape[-2] for x in (forward(torch.zeros(1, ch, s, s)))[-1]])
+                m.stride = torch.tensor([s / x.shape[-2] for x in (forward(torch.zeros(1, ch, s, s)))[-1]['x']])
                 # print(m.stride)
             else:
-                m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s))])  # forward
+                m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s))['x']])  # forward
             self.stride = m.stride
             m.bias_init()  # only run once
         else:
@@ -576,6 +580,10 @@ class DetectionModel_m(BaseModel_m):
         for i in range(2, 4):  # TODO:初始化其他头
             m = self.model[-i]
             if isinstance(m, Detect):
+                m.inplace = self.inplace
+                m.stride = self.stride
+                m.bias_init()
+            elif isinstance(m, ReDetect):
                 m.inplace = self.inplace
                 m.stride = self.stride
                 m.bias_init()
@@ -588,6 +596,7 @@ class DetectionModel_m(BaseModel_m):
 
     def _predict_augment(self, x_rgb, x_ir):
         """Perform augmentations on input image x and return augmented inference and train outputs."""
+        print("has execute _predict_augment")
         img_size = x_rgb.shape[-2:]  # height, width
         s = [1, 0.83, 0.67]  # scales
         f = [None, 3, None]  # flips (2-ud, 3-lr)
@@ -601,11 +610,16 @@ class DetectionModel_m(BaseModel_m):
         y = self._clip_augmented(y)  # clip augmented tails
         return torch.cat(y, -1), None  # augmented inference, train
 
+    #TODO,潜在被调用？
     @staticmethod
     def _descale_pred(p, flips, scale, img_size, dim=1):
         """De-scale predictions following augmented inference (inverse operation)."""
         p[:, :4] /= scale  # de-scale
         x, y, wh, cls = p.split((1, 1, 2, p.shape[dim] - 4), dim)
+        # print("cls shape is")
+        # print(cls.shape)
+        # import sys
+        # sys.exit()
         if flips == 2:
             y = img_size[0] - y  # de-flip ud
         elif flips == 3:
@@ -1341,7 +1355,8 @@ def guess_model_task(model):
             return "pose"
         if m == "obb":
             return "obb"
-
+        if m == "redetect":
+            return "detect"
     # Guess from model cfg
     if isinstance(model, dict):
         with contextlib.suppress(Exception):
@@ -1367,6 +1382,8 @@ def guess_model_task(model):
                 return "obb"
             elif isinstance(m, (Detect, WorldDetect)):
                 return "detect"
+            elif isinstance(m, ReDetect):
+                return "detect"
 
     # Guess from model filename
     if isinstance(model, (str, Path)):
@@ -1381,6 +1398,9 @@ def guess_model_task(model):
             return "obb"
         elif "detect" in model.parts:
             return "detect"
+        elif "redetect" in model.parts:
+            return "detect"
+
 
     # Unable to determine task from model
     LOGGER.warning(

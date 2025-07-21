@@ -163,10 +163,11 @@ class v8DetectionLoss:
         self.no = m.no
         self.reg_max = m.reg_max
         self.device = device
-
+        self.use_gfsd = True
         self.use_dfl = m.reg_max > 1
 
         self.assigner = TaskAlignedAssigner(topk=10, num_classes=self.nc, alpha=0.5, beta=6.0)
+        #print(f"self.assigner.nc = {self.nc}")
         self.bbox_loss = BboxLoss(m.reg_max - 1, use_dfl=self.use_dfl).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
         self.is_incremental = is_incremental
@@ -201,10 +202,11 @@ class v8DetectionLoss:
     def __call__(self, preds, batch):
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
         self.modal = gb.read_global_mode()
-        if self.is_incremental:
-            loss = torch.zeros(4, device=self.device)
-        else:
-            loss = torch.zeros(3, device=self.device)  # box, cls, dfl
+        loss = torch.zeros(3, device=self.device)
+        # if self.is_incremental and self.base_nc!=0 and self.use_gfsd:
+        #     loss = torch.zeros(4, device=self.device)
+        # else:
+        #     loss = torch.zeros(3, device=self.device)  # box, cls, dfl
         batch_size = 0
         # print(len(preds))
         # print(len(preds[0]))
@@ -232,20 +234,23 @@ class v8DetectionLoss:
                 # print(f'preds is {preds}')
                 if isinstance(preds[i], tuple):
                     feats = preds[i][1]
-                # elif isinstance(preds[i], dict):
-                #     feats = preds[i]['x']
-                #     base_nc = preds[i]['base_nc']
+                    if len(preds[i])>2:
+                         base_nc_feats = preds[i][2]
+                elif isinstance(preds[i], dict) and self.is_incremental:
+                    feats = preds[i]['x']
+                    base_nc_feats = preds[i]['base_x']
                 else:
                     feats = preds[i]
-                # print(feats[0].shape)
-                # print(feats[1].shape)
-                # print(feats[2].shape)
+
+                # print(feats[0].shape) #torch.Size([2, 77, 100, 100])
                 if self.is_incremental:
+                    # 处理feats，每个特征层跳过base_scores部分
                     tmp_pred_feat = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats],2)
                     pred_distri=tmp_pred_feat[:, :self.reg_max*4, :]
-                    base_scores=tmp_pred_feat[:, self.reg_max*4:self.reg_max*4+self.base_nc, :]
-                    base_scores=base_scores.permute(0,2,1).contiguous() # (Tensor): shape(bs, num_total_anchors, num_classes)
-                    pred_scores=tmp_pred_feat[:, self.reg_max*4+self.base_nc:, :]
+                    pred_scores=tmp_pred_feat[:, self.reg_max*4:, :]
+                    base_scores=torch.cat([xi.view(base_nc_feats[0].shape[0], self.base_nc, -1) for xi in base_nc_feats],2)
+                    base_scores=base_scores.permute(0, 2, 1).contiguous()
+
                 else:
                     pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats],
                                                         2).split(
@@ -254,7 +259,6 @@ class v8DetectionLoss:
 
                 pred_scores = pred_scores.permute(0, 2, 1).contiguous()
                 pred_distri = pred_distri.permute(0, 2, 1).contiguous()
-
                 dtype = pred_scores.dtype
                 batch_size = pred_scores.shape[0]
                 imgsz = torch.tensor(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[
@@ -270,7 +274,7 @@ class v8DetectionLoss:
                 # Pboxes
                 pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
 
-                _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
+                tg_labels, target_bboxes, target_scores, fg_mask, _ = self.assigner(
                     pred_scores.detach().sigmoid(),
                     (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
                     anchor_points * stride_tensor,
@@ -282,6 +286,12 @@ class v8DetectionLoss:
                 target_scores_sum = max(target_scores.sum(), 1)
                 # Cls loss
                 # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
+                # print(f"pred_scores.shape: {pred_scores.shape}")
+                # print(f"target_scores.shape: {target_scores.shape}")
+                # print(f"pred_scores sample: {pred_scores[0][0]}")
+                # print(f"target_scores sample: {target_scores[0][0]}")
+                # import sys
+                # sys.exit()
                 tmp_loss[1] += self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
                 # Bbox loss
                 if fg_mask.sum():
@@ -290,35 +300,62 @@ class v8DetectionLoss:
                         pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum,
                         fg_mask
                     )
-                if self.is_incremental:
+                if self.is_incremental and self.base_nc!=0 and self.use_gfsd:
                     # KL损失：保证pred_scores和base_scores的前base_nc个类别的预测值尽可能相似
                     # 对base_scores和pred_scores的前base_nc个类别进行sigmoid
-                    base_scores_sigmoid = torch.sigmoid(base_scores[:, :, :self.base_nc])  # (bs, num_total_anchors, base_nc)
-                    pred_scores_sigmoid = torch.sigmoid(pred_scores[:, :, :self.base_nc])  # (bs, num_total_anchors, base_nc)
+                    base_fg_mask = (tg_labels<self.base_nc).bool()&fg_mask.bool()
+                    base_fg_mask_dim1 = base_fg_mask.reshape(-1)
+                    # 获取所有前景目标（positive anchors）的数量
+                    num_fg = base_fg_mask_dim1.sum()
+                    # 只有当存在前景目标时，才计算KL损失,另外KL散度综合一定得为1，所以只能softmax
+                    if num_fg > 0:
+                        # 2. 从展平的 scores 中，根据行掩码 `base_fg_mask_dim1` 取出前景样本的 logits
+                        #    得到的张量形状为 (num_fg, total_num_classes)
+                        pred_logits_fg = pred_scores.reshape(-1, pred_scores.shape[-1])[base_fg_mask_dim1]
+                        base_logits_fg = base_scores.reshape(-1, base_scores.shape[-1])[base_fg_mask_dim1]
+
+                        # 3. 【列筛选】使用切片操作，直接从类别维度取出前 self.base_nc 个基类
+                        #    这是根据您的新要求所做的核心修改
+                        #    形状从 (num_fg, total_num_classes) -> (num_fg, self.base_nc)
+                        pred_logits_base = pred_logits_fg[..., :self.base_nc]
+                        base_logits_base = base_logits_fg[..., :self.base_nc]
+
+                        # 4. 【计算分布】在筛选出的基类集合上计算概率分布
+                        #    使用 log_softmax 以获得更好的数值稳定性
+                        log_pred_dist = F.log_softmax(pred_logits_base, dim=-1)
+                        base_dist = F.softmax(base_logits_base, dim=-1)
+
+                        # 5. 【计算损失】计算KL散度，'mean' reduction 会对所有元素取平均
+                        kl_loss = F.kl_div(
+                            log_pred_dist,
+                            base_dist,
+                            reduction='mean'
+                        )
+                    else:
+                        # 如果没有前景目标，则损失为0
+                        kl_loss = torch.tensor(0.0, device=pred_scores.device)
                     
-                    # 计算KL散度损失
-                    # 使用KLDivLoss，需要将target转换为log形式
-                    kl_loss = F.kl_div(
-                        torch.log(pred_scores_sigmoid + 1e-8),  # 避免log(0)
-                        base_scores_sigmoid,
-                        reduction='batchmean'
-                    )
-                    tmp_loss[3] = kl_loss  # KL损失
                     
                 tmp_loss[0] *= (self.hyp.box * hyper_weight)  # box gain
                 tmp_loss[1] *= (self.hyp.cls * hyper_weight)  # cls gain
                 tmp_loss[2] *= (self.hyp.dfl * hyper_weight)  # dfl gain
-                if self.is_incremental:
-                    tmp_loss[3] *= (0.1 * hyper_weight)  # kl gain (需要在hyperparameters中添加kl权重)
+                if self.is_incremental and self.base_nc!=0 and self.use_gfsd:
+                    tmp_loss[2] += kl_loss*0.01
                 loss[0] += tmp_loss[0]
                 loss[1] += tmp_loss[1]
                 loss[2] += tmp_loss[2]
-                if self.is_incremental:
-                    loss[3] += tmp_loss[3]
+                # if self.is_incremental and self.base_nc!=0 and self.use_gfsd:
+                #     loss[3] += tmp_loss[3]
 
             return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
         else:
-            feats = preds[1] if isinstance(preds, tuple) else preds
+            if isinstance(preds[i], tuple):
+                feats = preds[i][1]
+            elif isinstance(preds[i], dict) and self.is_incremental:
+                feats = preds[i]['x']
+                base_nc_feats = preds[i]['base_x']
+            else:
+                feats = preds[i]
             # print(isinstance(preds,tuple))
             # print(feats[0].shape)
             # print(feats[1].shape)

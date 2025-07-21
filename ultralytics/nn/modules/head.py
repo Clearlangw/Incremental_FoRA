@@ -87,20 +87,6 @@ class Detect(nn.Module):
         """Decode bounding boxes."""
         return dist2bbox(bboxes, anchors, xywh=True, dim=1)
 
-
-def clone_tensor_structure(x):
-    if torch.is_tensor(x):
-        return x.clone()
-    elif isinstance(x, list):
-        return [clone_tensor_structure(i) for i in x]
-    elif isinstance(x, tuple):
-        return tuple(clone_tensor_structure(i) for i in x)
-    elif isinstance(x, dict):
-        return {k: clone_tensor_structure(v) for k, v in x.items()}
-    else:
-        return x  # 其他类型直接返回
-
-
 class ReDetect(nn.Module):
     """
     增量学习双头结构，base_head只预测base类别，novel_head预测所有类别（即nc），
@@ -121,7 +107,7 @@ class ReDetect(nn.Module):
         self.base_nc = base_nc
         self.novel_nc = nc - base_nc
         # 修复：正确计算输出维度
-        self.no = self.reg_max * 4 + self.base_nc + self.nc  # number of outputs per anchor #
+        self.no = self.reg_max * 4 + self.nc  # number of outputs per anchor #
         self.stride = torch.zeros(self.nl)  # strides computed during build
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
         self.cv2 = nn.ModuleList(
@@ -139,34 +125,35 @@ class ReDetect(nn.Module):
     def forward(self, x):
         """Concatenates and returns predicted bounding boxes and class probabilities."""
         #TODO:第一部分，修改为计算novel和base的特征 完成
+        base_x = []
         for i in range(self.nl):
-            x[i] = torch.cat((self.cv2[i](x[i]), self.base_cv3[i](x[i]),self.novel_cv3[i](x[i])), 1)
-        
+            #x[i] = torch.cat((self.cv2[i](x[i]), self.base_cv3[i](x[i]),self.novel_cv3[i](x[i])), 1)
+            base_x.append(self.base_cv3[i](x[i]))
+            x[i] = torch.cat((self.cv2[i](x[i]), self.novel_cv3[i](x[i])), 1)
+            # print(x[i].shape)
+
         #TODO:第二部分，确定输出的情况方便后续loss计算，目前输出元组（？）然后再loss里面分辨novel和base做蒸馏损失
         if self.training:  # Training path
-            # print(f"ReDetect 输出x: {x}")
-            #return {'x': x, 'base_nc': self.base_nc}
-            return x
-
+            return {'x': x, 'base_x': base_x}
         #TODO:第三部分，推理阶段，融合base和novel的推理结果，考虑引入bonus值
         # Inference path
         shape = x[0].shape  # BCHW
         x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
+        base_x_cat = torch.cat([xi.view(shape[0], self.base_nc, -1) for xi in base_x], 2)
         if self.dynamic or self.shape != shape:
             self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
             self.shape = shape
 
         if self.export and self.format in ("saved_model", "pb", "tflite", "edgetpu", "tfjs"):  # avoid TF FlexSplitV ops
             box = x_cat[:, : self.reg_max * 4]
-            #cls = x_cat[:, self.reg_max * 4 :]
-            base_cls = x_cat[:, self.reg_max * 4 : self.reg_max * 4 + self.base_nc]
-            novel_cls = x_cat[:, self.reg_max * 4 + self.base_nc :]
+            #base_cls = x_cat[:, self.reg_max * 4 : self.reg_max * 4 + self.base_nc]
+            novel_cls = x_cat[:, self.reg_max * 4:]
         else:
             # box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
             # x_cat的结构: [batch_size, reg_max*4 + base_nc + nc, -1]
             box = x_cat[:, : self.reg_max * 4]
-            base_cls = x_cat[:, self.reg_max * 4 : self.reg_max * 4 + self.base_nc]
-            novel_cls = x_cat[:, self.reg_max * 4 + self.base_nc :]
+            #base_cls = x_cat[:, self.reg_max * 4 : self.reg_max * 4 + self.base_nc]
+            novel_cls = x_cat[:, self.reg_max * 4:]
 
         if self.export and self.format in ("tflite", "edgetpu"):
             # Precompute normalization factor to increase numerical stability
@@ -180,66 +167,34 @@ class ReDetect(nn.Module):
             dbox = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
 
         #TODO:这里分析最终输出的logits到底选哪个
-        # 修复：正确融合base_cls和novel_cls的预测结果
-        # 策略：使用novel_cls的base部分替换base_cls，然后拼接
-        novel_base_cls = novel_cls[:, :self.base_nc]  # novel_cls的前base_nc个类别
+        #novel_base_cls = novel_cls[:, :self.base_nc]  # novel_cls的前base_nc个类别
+        novel_base_cls = base_x_cat
         novel_novel_cls = novel_cls[:, self.base_nc:]  # novel_cls的后novel_nc个类别
-        # 融合策略：可以选择使用base_cls或novel_base_cls，这里使用novel_base_cls
+        # # 融合策略：可以选择使用base_cls或novel_base_cls，这里使用novel_base_cls
         fused_cls = torch.cat((novel_base_cls, novel_novel_cls), 1)
-        y = torch.cat((dbox, fused_cls.sigmoid()), 1)
-        return y if self.export else (y, x)
+        # fused_cls = novel_cls
+        fused_cls_sigmoid = fused_cls.sigmoid()
+        # 对新类别部分加bonus
+        # if fused_cls_sigmoid.shape[1] > self.base_nc:
+        #     fused_cls_sigmoid[:, self.base_nc:] += 0.2
+        y = torch.cat((dbox, fused_cls_sigmoid), 1)
+
+        return y if self.export else (y, x, base_x)
 
     def bias_init(self):
         """Initialize ReDetect() biases, WARNING: requires stride availability."""
         m = self  # self.model[-1]  # ReDetect() module
-        # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1
-        # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
-        for a, b_base, b_novel, s in zip(m.cv2, m.base_cv3, m.novel_cv3, m.stride):  # from
+        # for a, b_base, b_novel, s in zip(m.cv2, m.base_cv3, m.novel_cv3, m.stride):  # from
+        #     a[-1].bias.data[:] = 1.0  # box
+        #     b_base[-1].bias.data[: m.base_nc] = math.log(5 / m.base_nc / (640 / s) ** 2)  # base cls
+        #     b_novel[-1].bias.data[: m.nc] = math.log(5 / m.base_nc / (640 / s) ** 2)  # novel cls(原本被初始化为base_nc那个)
+        for a, b_novel, s in zip(m.cv2, m.novel_cv3, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b_base[-1].bias.data[: m.base_nc] = math.log(5 / m.base_nc / (640 / s) ** 2)  # base cls
-            b_novel[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # novel cls
+            b_novel[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # novel cls(原本被初始化为base_nc那个)
 
     def decode_bboxes(self, bboxes, anchors):
         """Decode bounding boxes."""
         return dist2bbox(bboxes, anchors, xywh=True, dim=1)
-    
-    # def forward(self, x):
-    #     # x: list of feature maps
-    #     base_logits = [self.base_head[i](x[i]) for i in range(self.nl)]
-    #     novel_logits = [self.novel_head[i](x[i]) for i in range(self.nl)]
-    #     # 训练阶段
-    #     if self.training:
-    #         # 计算KL蒸馏损失
-    #         cls_consistency_loss = self.calculate_cls_consistency_loss(base_logits, novel_logits)
-    #         # 返回novel_logits和蒸馏损失
-    #         return novel_logits, cls_consistency_loss
-    #     else:
-    #         # 推理阶段，拼接base和novel输出
-    #         # base_head输出: [bs, base_nc, h, w]，novel_head输出: [bs, nc, h, w]
-    #         # 拼接方式：用novel_head的novel部分替换base_head的novel部分
-    #         out = []
-    #         for i in range(self.nl):
-    #             # base部分
-    #             base_part = base_logits[i]
-    #             # novel部分
-    #             novel_part = novel_logits[i][:, self.base_nc:, ...]
-    #             # 拼接
-    #             out_i = torch.cat([base_part, novel_part], dim=1)  # [bs, nc, h, w]
-    #             out.append(out_i)
-    #         # 其余推理流程可复用Detect
-    #         return super().forward(out)
-
-    # def calculate_cls_consistency_loss(self, base_logits, novel_logits):
-    #     # 以KL散度为例
-    #     loss = 0
-    #     KL = nn.KLDivLoss(reduction="batchmean")
-    #     for b, n in zip(base_logits, novel_logits):
-    #         # 只对base类别部分做蒸馏
-    #         base_prob = torch.softmax(b, dim=1)
-    #         novel_log_prob = torch.log_softmax(n[:, :self.base_nc, ...], dim=1)
-    #         loss += KL(novel_log_prob, base_prob)
-    #     return loss
-
 
 class Segment(Detect):
     """YOLOv8 Segment head for segmentation models."""

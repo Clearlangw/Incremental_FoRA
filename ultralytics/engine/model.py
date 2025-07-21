@@ -237,7 +237,7 @@ class Model(nn.Module):
             self.model, self.ckpt = weights, None
             self.task = task or guess_model_task(weights)
             self.ckpt_path = weights
-        self.overrides["model"] = weights
+        self.overrides["model"] = weights #这里其实是不是该存一下？
         self.overrides["task"] = self.task
 
     def _check_is_pytorch_model(self) -> None:
@@ -620,6 +620,7 @@ class Model(nn.Module):
             PermissionError: If there is a permission issue with the HUB session.
             ModuleNotFoundError: If the HUB SDK is not installed.
         """
+        #kwargs {'data': 'vedaifewshot_dv_vedai.yaml', 'epochs': 50, 'patience': 30, 'batch': 1, 'imgsz': 800, 'device': [0], 'r_init': 9, 'r_target': 6, 'adalora': True, 'project': 'incremental_old_model_gfsd_train_m', 'name': 'test_redetect', 'optimizer': 'SGD', 'seed': 0, 'freeze': 19}
         self._check_is_pytorch_model()
         if hasattr(self.session, "model") and self.session.model.id:  # Ultralytics HUB session with loaded model
             if any(kwargs):
@@ -629,8 +630,10 @@ class Model(nn.Module):
         checks.check_pip_update_available()
 
         overrides = yaml_load(checks.check_yaml(kwargs["cfg"])) if kwargs.get("cfg") else self.overrides
+        #overrides {'task': 'detect', 'data': 'drone_vehicle_m.yaml', 'imgsz': 800, 'single_cls': False, 'model': '/root/autodl-tmp/Original_DroneVehicle_workdir/ScaleConvFuse/weights/best.pt'}
         custom = {"data": DEFAULT_CFG_DICT["data"] or TASK2DATA[self.task]}  # method defaults
         args = {**overrides, **custom, **kwargs, "mode": "train"}  # highest priority args on the right
+        #{'task': 'detect', 'data': 'vedaifewshot_dv_vedai.yaml', 'imgsz': 800, 'single_cls': False, 'model': '/root/autodl-tmp/Original_DroneVehicle_workdir/ScaleConvFuse/weights/best.pt', 'epochs': 50, 'patience': 30, 'batch': 1, 'device': [0], 'r_init': 9, 'r_target': 6, 'adalora': True, 'project': 'incremental_old_model_gfsd_train_m', 'name': 'test_redetect', 'optimizer': 'SGD', 'seed': 0, 'freeze': 19, 'mode': 'train'}
         if args.get("resume"):
             args["resume"] = self.ckpt_path
 
@@ -811,6 +814,7 @@ class Model(nn.Module):
     def _smart_load(self, key: str):
         """Load model/trainer/validator/predictor."""
         try:
+            # print(f"self.task: {self.task}")
             return self.task_map[self.task][key]
         except Exception as e:
             name = self.__class__.__name__

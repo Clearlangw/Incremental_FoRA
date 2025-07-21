@@ -886,7 +886,7 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False,increm
         # 更新检查点中的YAML配置
         ckpt["model"].yaml = new_yaml
         LOGGER.info(f"YAML配置已更新，base_nc={ckpt['model'].yaml.get('base_nc')}")
-        new_model = DetectionModel_m(cfg=new_yaml, nc=ckpt['model'].yaml.get('nc'), verbose=True)
+        new_model = DetectionModel_m(cfg=new_yaml, ch=3,nc=ckpt['model'].yaml.get('nc'), verbose=True)
         # print(type(ckpt["model"]))
         # import sys
         # sys.exit()            
@@ -898,7 +898,11 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False,increm
     # import sys
     # sys.exit()
     # Model compatibility updates
+    #TODO：这里没有更新模型的参数
     model.args = {k: v for k, v in args.items() if k in DEFAULT_CFG_KEYS}  # attach args to model
+    # print(weight)
+    # import sys
+    # sys.exit()
     model.pt_path = weight  # attach *.pt file path to model
     model.task = guess_model_task(model)
     if not hasattr(model, "stride"):
@@ -948,9 +952,9 @@ def rebuild_model_with_redetect(ckpt,new_model):
     nc = ckpt['model'].yaml.get('nc', 80)  # 默认nc为80
     print(f"配置信息: base_nc={base_nc}, nc={nc}")
     
+    # 先处理base_cv3的重命名
     for k in list(state_dict.keys()):
         key_parts = k.split('.')
-        
         # 检查是否是cv3层且在目标layer_id中
         if (len(key_parts) >= 3 and 
             key_parts[2] == 'cv3' and 
@@ -960,13 +964,61 @@ def rebuild_model_with_redetect(ckpt,new_model):
             new_key_parts[2] = 'base_cv3'
             new_key = '.'.join(new_key_parts)
             keys_to_rename[k] = new_key
-    
-    # 4. 执行重命名
+    # 执行重命名
     for old_key, new_key in keys_to_rename.items():
         if old_key in state_dict:
             state_dict[new_key] = state_dict.pop(old_key)
             print(f"重命名: {old_key} -> {new_key}")
-    
+    # print(list(new_model.state_dict().keys()))
+    # import sys
+    # sys.exit()
+    # 迁移novel_cv3权重，仿照base_cv3的遍历方式
+    for k in list(state_dict.keys()):
+        key_parts = k.split('.')
+        # 检查是否是base_cv3层且在目标layer_id中
+        if (len(key_parts) >= 3 and
+            key_parts[2] == 'base_cv3' and
+            int(key_parts[1]) in dfl_layer_ids):
+            novel_key_parts = key_parts.copy()
+            novel_key_parts[2] = 'novel_cv3'
+            novel_key = '.'.join(novel_key_parts)
+            print(f"检测到需要迁移: {novel_key}")
+            # 分类卷积层特殊处理
+            # 'model.57.cv3.0.2.weight'
+            if len(key_parts) == 6 and key_parts[-1] in ['weight', 'bias'] and int(key_parts[-2]) == 2 and int(key_parts[-3]) in [0,1,2]:
+                pass
+                # state_dict[novel_key] = new_model.state_dict()[novel_key]
+                # state_dict[novel_key][:base_nc] = state_dict[k][:base_nc]
+                # if key_parts[-1] == 'bias':
+                #     # base_nc之后的bias全部赋值为前base_nc的均值
+                #     # mean_val = state_dict[k][:base_nc].mean()
+                #     # state_dict[novel_key][base_nc:] = mean_val
+                #     base_biases = state_dict[k][:base_nc] #k是原来的值
+                #     mean_val = base_biases.mean()
+                #     std_val = base_biases.std()
+                #     # b. 用计算出的均值和标准差来初始化新类别的 bias
+                #     #    这样新 bias 就有了和旧 bias 相似的数值范围和分布，同时打破了对称性
+                #     target_slice = state_dict[novel_key][base_nc:]
+                #     torch.nn.init.normal_(target_slice, mean=mean_val, std=std_val)
+                # if key_parts[-1] == 'weight':
+                #     # # 用前base_nc个的均值初始化后base_nc个
+                #     # w = state_dict[k]
+                #     # # 计算每个in_channel、h、w的均值，shape为[1, in_c, h, w]
+                #     # mean_vec = w[:base_nc].mean(dim=0, keepdim=True)
+                #     # # 用前base_nc个的均值初始化后base_nc个，并加噪声
+                #     # noise_std = w[:base_nc].std().item()  # 用前base_nc的方差作为噪声强度
+                #     # noise = torch.randn_like(state_dict[novel_key][base_nc:]) * noise_std
+                #     # state_dict[novel_key][base_nc:] = mean_vec.expand_as(state_dict[novel_key][base_nc:]) + noise
+                #     base_weights = state_dict[k][:base_nc]
+                #     mean_vec = base_weights.mean(dim=0, keepdim=True) # 计算平均滤波器
+                #     std_val = base_weights.std() # 计算整体标准差
+                #     # b. 将平均滤波器作为基础，加上符合旧分布的噪声
+                #     #    这能确保新 weight 在“风格”上和旧 weight 类似，但又各不相同
+                #     target_slice = state_dict[novel_key][base_nc:]
+                #     noise = torch.randn_like(target_slice) * std_val
+                #     target_slice.copy_(mean_vec.expand_as(target_slice) + noise)
+            else:
+                state_dict[novel_key] = state_dict[k].clone()
     # 加载修改后的权重
     missing_keys, unexpected_keys = new_model.load_state_dict(state_dict, strict=False)
     
@@ -978,6 +1030,8 @@ def rebuild_model_with_redetect(ckpt,new_model):
     # 更新检查点
     ckpt['model'] = new_model
     print("模型重建完成！")
+    # import sys
+    # sys.exit()
     return ckpt
 
 def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
@@ -1127,6 +1181,80 @@ def guess_model_scale(model_path):
     return ""
 
 
+# def guess_model_task(model):
+#     """
+#     Guess the task of a PyTorch model from its architecture or configuration.
+
+#     Args:
+#         model (nn.Module | dict): PyTorch model or model configuration in YAML format.
+
+#     Returns:
+#         (str): Task of the model ('detect', 'segment', 'classify', 'pose').
+
+#     Raises:
+#         SyntaxError: If the task of the model could not be determined.
+#     """
+
+#     def cfg2task(cfg):
+#         """Guess from YAML dictionary."""
+#         m = cfg["head"][-1][-2].lower()  # output module name
+#         if m in ("classify", "classifier", "cls", "fc"):
+#             return "classify"
+#         if m == "detect":
+#             return "detect"
+#         if m == "segment":
+#             return "segment"
+#         if m == "pose":
+#             return "pose"
+#         if m == "obb":
+#             return "obb"
+
+#     # Guess from model cfg
+#     if isinstance(model, dict):
+#         with contextlib.suppress(Exception):
+#             return cfg2task(model)
+
+#     # Guess from PyTorch model
+#     if isinstance(model, nn.Module):  # PyTorch model
+#         for x in "model.args", "model.model.args", "model.model.model.args":
+#             with contextlib.suppress(Exception):
+#                 return eval(x)["task"]
+#         for x in "model.yaml", "model.model.yaml", "model.model.model.yaml":
+#             with contextlib.suppress(Exception):
+#                 return cfg2task(eval(x))
+
+#         for m in model.modules():
+#             if isinstance(m, Segment):
+#                 return "segment"
+#             elif isinstance(m, Classify):
+#                 return "classify"
+#             elif isinstance(m, Pose):
+#                 return "pose"
+#             elif isinstance(m, OBB):
+#                 return "obb"
+#             elif isinstance(m, (Detect, WorldDetect)):
+#                 return "detect"
+
+#     # Guess from model filename
+#     if isinstance(model, (str, Path)):
+#         model = Path(model)
+#         if "-seg" in model.stem or "segment" in model.parts:
+#             return "segment"
+#         elif "-cls" in model.stem or "classify" in model.parts:
+#             return "classify"
+#         elif "-pose" in model.stem or "pose" in model.parts:
+#             return "pose"
+#         elif "-obb" in model.stem or "obb" in model.parts:
+#             return "obb"
+#         elif "detect" in model.parts:
+#             return "detect"
+
+#     # Unable to determine task from model
+#     LOGGER.warning(
+#         "WARNING ⚠️ Unable to automatically guess model task, assuming 'task=detect'. "
+#         "Explicitly define task for your model, i.e. 'task=detect', 'segment', 'classify','pose' or 'obb'."
+#     )
+#     return "detect"  # assume detect
 def guess_model_task(model):
     """
     Guess the task of a PyTorch model from its architecture or configuration.
@@ -1154,7 +1282,8 @@ def guess_model_task(model):
             return "pose"
         if m == "obb":
             return "obb"
-
+        if m == "redetect":
+            return "detect"
     # Guess from model cfg
     if isinstance(model, dict):
         with contextlib.suppress(Exception):
@@ -1180,6 +1309,8 @@ def guess_model_task(model):
                 return "obb"
             elif isinstance(m, (Detect, WorldDetect)):
                 return "detect"
+            elif isinstance(m, ReDetect):
+                return "detect"
 
     # Guess from model filename
     if isinstance(model, (str, Path)):
@@ -1194,6 +1325,9 @@ def guess_model_task(model):
             return "obb"
         elif "detect" in model.parts:
             return "detect"
+        elif "redetect" in model.parts:
+            return "detect"
+
 
     # Unable to determine task from model
     LOGGER.warning(
