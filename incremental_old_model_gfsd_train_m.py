@@ -4,17 +4,16 @@ from ultralytics import YOLO_m
 
 
 #model = YOLO_m("/root/FoRA/yolov8n_lma_multi_head.yaml")
+#model = YOLO_m("yolov8h_incremental_lma_multi_head_ScaleConvFuse.yaml")
+#print(model.model.modal)
 
 model = YOLO_m("/root/autodl-tmp/Original_DroneVehicle_workdir/ScaleConvFuse/weights/best.pt",incremental_yaml="incremental_yolov8h_lma_multi_head_ScaleConvFuse.yaml")
-#model = YOLO_m("yolov8h_incremental_lma_multi_head_ScaleConvFuse.yaml")
-# print(model.model.modal)
 model.model.modal = 'both'
-
-model.train(data="incremental_vedai2dvvedai.yaml",
+model.train(data="incremental_vedai.yaml",
             #incremental_yaml = "yolov8h_incremental_lma_multi_head_ScaleConvFuse.yaml",#增量的模型
-            epochs=20,
+            epochs=200,
             patience=10,
-            batch=1,
+            batch=2,
             imgsz=800,
             device=[0],
             r_init=9,
@@ -24,8 +23,17 @@ model.train(data="incremental_vedai2dvvedai.yaml",
             name='normal_incremental_vedai2dvvedai',
             # pretrained=False,
             optimizer='SGD',
-            # lr0 = 0.2,
+            lr0 = 0.05,
             seed=0,
             freeze=55,
             # resume=True,
             )
+# model = YOLO_m("/root/FoRA/incremental_old_model_gfsd_train_m/normal_incremental_vedai2dvvedai/weights/best.pt")
+# model.model.modal = 'both'
+# model.val(data="incremental_vedai2dvvedai.yaml",
+#           project="incremental_old_model_gfsd_train_m",
+#           name='test_normal_incremental_vedai2dvvedai',
+#           imgsz=800,
+#           batch=20,
+#           device=[0]
+#           )

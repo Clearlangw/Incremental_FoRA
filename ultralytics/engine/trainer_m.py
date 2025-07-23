@@ -791,7 +791,7 @@ class BaseTrainer_m:
         #TODO：蒸馏第一处实现
         if overrides:
             self.teacher = overrides.get("teacher", None)
-            self.loss_type = overrides.get("distillation_loss", None)
+            self.distill_loss_type = overrides.get("distillation_loss", None)
             self.distill_layers = overrides.get("distill_layers", None)
             if "teacher" in overrides:
                 overrides.pop("teacher")
@@ -800,7 +800,7 @@ class BaseTrainer_m:
             if "distill_layers" in overrides:
                 overrides.pop("distill_layers")
         else:
-            self.loss_type = None
+            self.distill_loss_type = None
             self.teacher = None
             self.distill_layers = None
         init_seeds(self.args.seed + 1 + RANK, deterministic=self.args.deterministic)
@@ -1084,7 +1084,7 @@ class BaseTrainer_m:
         #TODO：蒸馏第四处实现
         # make loss
         if self.teacher is not None:
-            distillation_loss = DistillationLoss(self.model, self.teacher,layers=self.distill_layers, distiller=self.loss_type)
+            distillation_loss = DistillationLoss(self.model, self.teacher,layers=self.distill_layers, distiller=self.distill_loss_type)
         epoch = self.start_epoch
         while True:
             self.epoch = epoch
@@ -1126,6 +1126,14 @@ class BaseTrainer_m:
                 with torch.cuda.amp.autocast(self.amp):
                     batch = self.preprocess_batch(batch)
                     self.loss, self.loss_items = self.model(batch ,batch)
+                    # (Pdb) p self.loss
+                    # tensor(26.5551, device='cuda:0', grad_fn=<MulBackward0>)
+                    # (Pdb) p self.loss_items
+                    # tensor([ 8.3959, 13.7569,  4.4023], device='cuda:0')
+                    # (Pdb) p self.tloss
+                    # tensor([ 8.3959, 13.7569,  4.4023], device='cuda:0')
+                    # import pdb
+                    # pdb.set_trace()
                     if RANK != -1:
                         self.loss *= world_size
                     self.tloss = (

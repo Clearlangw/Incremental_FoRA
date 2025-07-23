@@ -340,7 +340,7 @@ class v8DetectionLoss:
                 tmp_loss[1] *= (self.hyp.cls * hyper_weight)  # cls gain
                 tmp_loss[2] *= (self.hyp.dfl * hyper_weight)  # dfl gain
                 if self.is_incremental and self.base_nc!=0 and self.use_gfsd:
-                    tmp_loss[2] += kl_loss*0.01
+                    tmp_loss[2] += kl_loss*0.5
                 loss[0] += tmp_loss[0]
                 loss[1] += tmp_loss[1]
                 loss[2] += tmp_loss[2]
