@@ -55,6 +55,39 @@ __all__ = (
     "A2C2f",
 )
 
+# class GDL(nn.Module):
+#     def __init__(self, _lambda) -> None:
+#         super().__init__()
+#         self._lambda = _lambda
+
+#     def forward(self, x):
+#         return x
+
+#     def backward(self, grad_output):
+#         grad_output = grad_output * self._lambda
+#         return grad_output, None
+
+
+# class AffineLayer(nn.Module):
+#     def __init__(self, c1, bias=False):
+#         super(AffineLayer, self).__init__()
+#         weight = torch.FloatTensor(1, c1, 1, 1).fill_(1)
+#         self.weight = nn.Parameter(weight, requires_grad=True)
+
+#         self.bias = None
+#         if bias:
+#             bias = torch.FloatTensor(1, c1, 1, 1).fill_(0)
+#             self.bias = nn.Parameter(bias, requires_grad=True)
+
+#     def forward(self, X):
+#         out = X * self.weight.expand_as(X)
+#         if self.bias is not None:
+#             out = out + self.bias.expand_as(X)
+#         return out
+
+
+# def decouple_layer(x, _lambda):
+#     return GDL.apply(x, _lambda)
 
 class DFL(nn.Module):
     """
@@ -1895,9 +1928,11 @@ class A2C2f(nn.Module):
         """
         super().__init__()
         c_ = int(c2 * e)  # hidden channels
+        if c_<32:
+            c_=64
         c_ = min(96, c_)
         assert c_ % 32 == 0, "Dimension of ABlock be a multiple of 32."
-        
+        # print(f"c1:{c1}, c_:{c_}")
         self.cv1 = Conv(c1, c_, 1, 1)
         self.cv2 = Conv((1 + n) * c_, c2, 1)
 

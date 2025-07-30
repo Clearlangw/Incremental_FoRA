@@ -20,6 +20,7 @@ import numpy as np
 import torch
 from torch import distributed as dist
 from torch import nn, optim
+import torch.nn.functional as F
 
 from ultralytics.cfg import get_cfg, get_save_dir
 from ultralytics.data.utils_m import check_cls_dataset, check_det_dataset_m
@@ -49,8 +50,6 @@ from ultralytics.utils.torch_utils import (
     select_device,
     strip_optimizer,
 )
-
-import torch.nn.functional as F
 
 #特征蒸馏这一块
 class CWDLoss(nn.Module):
@@ -789,6 +788,17 @@ class BaseTrainer_m:
         self.metrics = None
         self.plots = {}
         #TODO：蒸馏第一处实现
+        # 对比学习和原型学习相关参数
+        self.use_contrastive = overrides.get('use_contrastive', False) if overrides else getattr(self.args, 'use_contrastive', False)
+        self.contrastive_weight = overrides.get('contrastive_weight', 0.1) if overrides else getattr(self.args, 'contrastive_weight', 0.1)
+        self.contrastive_temperature = overrides.get('contrastive_temperature', 0.07) if overrides else getattr(self.args, 'contrastive_temperature', 0.07)
+        self.contrastive_output_size = overrides.get('contrastive_output_size', (3, 3)) if overrides else getattr(self.args, 'contrastive_output_size', (3, 3))
+        self.use_negative_weighted_contrastive = overrides.get('use_negative_weighted_contrastive', False) if overrides else getattr(self.args, 'use_negative_weighted_contrastive', False)
+        # 原型学习相关参数
+        self.use_prototype = overrides.get('use_prototype', False) if overrides else getattr(self.args, 'use_prototype', False)
+        self.prototype_weight = overrides.get('prototype_weight', 0.1) if overrides else getattr(self.args, 'prototype_weight', 0.1)
+        self.prototype_memory_size = overrides.get('prototype_memory_size', 20) if overrides else getattr(self.args, 'prototype_memory_size', 20)
+        self.is_contrastive_or_prototype = self.use_contrastive or self.use_prototype
         if overrides:
             self.teacher = overrides.get("teacher", None)
             self.distill_loss_type = overrides.get("distillation_loss", None)
@@ -859,6 +869,10 @@ class BaseTrainer_m:
         self.callbacks = _callbacks or callbacks.get_default_callbacks()
         if RANK in (-1, 0):
             callbacks.add_integration_callbacks(self)
+            
+        # 初始化多模态多层次原型库
+        self.prototype_memory = {}  # {modal_layer_key: {class_id: prototype_features}}
+        self.prototype_count = {}   # {modal_layer_key: {class_id: count}}
 
     def add_callback(self, event: str, callback):
         """Appends the given callback."""
@@ -1085,6 +1099,24 @@ class BaseTrainer_m:
         # make loss
         if self.teacher is not None:
             distillation_loss = DistillationLoss(self.model, self.teacher,layers=self.distill_layers, distiller=self.distill_loss_type)
+        
+        #TODO：对比学习第一处实现
+        # 初始化对比学习相关参数
+        # self.use_contrastive = getattr(self.args, 'use_contrastive', False)
+        # self.contrastive_weight = getattr(self.args, 'contrastive_weight', 0.1)
+        # self.contrastive_temperature = getattr(self.args, 'contrastive_temperature', 0.07)
+        # self.contrastive_output_size = getattr(self.args, 'contrastive_output_size', (3, 3))
+        
+        # # 原型学习相关参数（用于增量学习）
+        # self.use_prototype = getattr(self.args, 'use_prototype', False)
+        # self.prototype_weight = getattr(self.args, 'prototype_weight', 0.05)
+        # self.prototype_memory_size = getattr(self.args, 'prototype_memory_size', 20)
+        
+        # # 初始化原型记忆库（如果启用）
+        # if self.use_prototype:
+        #     self.prototype_memory = {}  # {modal_layer_key: {class_id: prototype_features}}
+        #     self.prototype_count = {}   # {modal_layer_key: {class_id: count}}
+            
         epoch = self.start_epoch
         while True:
             self.epoch = epoch
@@ -1125,20 +1157,23 @@ class BaseTrainer_m:
                 # Forward
                 with torch.cuda.amp.autocast(self.amp):
                     batch = self.preprocess_batch(batch)
-                    self.loss, self.loss_items = self.model(batch ,batch)
-                    # (Pdb) p self.loss
-                    # tensor(26.5551, device='cuda:0', grad_fn=<MulBackward0>)
-                    # (Pdb) p self.loss_items
-                    # tensor([ 8.3959, 13.7569,  4.4023], device='cuda:0')
-                    # (Pdb) p self.tloss
-                    # tensor([ 8.3959, 13.7569,  4.4023], device='cuda:0')
-                    # import pdb
-                    # pdb.set_trace()
+                    model_output = self.model(batch,batch)
+                    
+                    # 检查模型输出是否包含ROI特征
+                    if len(model_output) == 3:
+                        # 有ROI特征的情况
+                        self.loss, self.loss_items, roi_features_data = model_output
+                    else:
+                        # 没有ROI特征的情况
+                        self.loss, self.loss_items = model_output
+                        roi_features_data = None
+                    
                     if RANK != -1:
                         self.loss *= world_size
                     self.tloss = (
                         (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None else self.loss_items
                     )
+                    
                 #TODO：蒸馏第六处实现
                 # Add more distillation logic
                 if self.teacher is not None:
@@ -1147,8 +1182,56 @@ class BaseTrainer_m:
                         pred = self.teacher(batch['img_rgb'],batch['img_ir']) #TODO：这里不确定（？）不过和valid一致了
                         
                     self.d_loss = distillation_loss.get_loss()
-                    self.d_loss *- distill_weight
+                    self.d_loss *= distill_weight
                     self.loss += self.d_loss
+
+                # 处理ROI特征进行原型学习和对比学习
+                if roi_features_data is not None and (self.use_contrastive or self.use_prototype):
+                    # 初始化多模态多层次原型库（如果还没有初始化）
+                    if not hasattr(self, 'prototype_memory'):
+                        self.prototype_memory = {}  # {modal_layer_key: {class_id: prototype_features}}
+                    if not hasattr(self, 'prototype_count'):
+                        self.prototype_count = {}   # {modal_layer_key: {class_id: count}}
+                    
+                    # 处理每个模态每个层次的ROI特征
+                    for roi_info in roi_features_data:
+                        modal_idx = roi_info['modal_idx']
+                        layer_idx = roi_info['layer_idx']
+                        features = roi_info['features']  # [num_roi, feat_dim]
+                        labels = roi_info['labels']      # [num_roi]
+                        
+                        # 创建模态-层键
+                        modal_layer_key = f"modal_{modal_idx}_layer_{layer_idx}"
+                        
+                        # 初始化该模态-层的原型库
+                        if modal_layer_key not in self.prototype_memory:
+                            self.prototype_memory[modal_layer_key] = {}
+                        if modal_layer_key not in self.prototype_count:
+                            self.prototype_count[modal_layer_key] = {}
+                        
+                        # 更新原型库
+                        self.update_prototype_memory_multi_modal(
+                            features, labels, modal_layer_key
+                        )
+                        
+                        # 计算原型学习损失
+                        if self.use_prototype:
+                            prototype_loss = self.compute_prototype_loss_multi_modal(
+                                features, labels, modal_layer_key
+                            )
+                            self.loss += prototype_loss
+                        
+                        # 计算对比学习损失（与原型库中的特征进行对比）
+                        if self.use_contrastive:
+                            if self.use_negative_weighted_contrastive:
+                                contrast_loss = self.compute_contrastive_loss_with_weighted_negatives(
+                                    features, labels, modal_layer_key
+                                )
+                            else:
+                                contrast_loss = self.compute_contrastive_loss_with_prototypes(
+                                    features, labels, modal_layer_key
+                                )
+                            self.loss += contrast_loss
 
                 # Backward
                 self.scaler.scale(self.loss).backward()
@@ -1555,3 +1638,282 @@ class BaseTrainer_m:
             f'{len(g[1])} weight(decay=0.0), {len(g[0])} weight(decay={decay}), {len(g[2])} bias(decay=0.0)'
         )
         return optimizer
+
+    #TODO：对比学习第二处实现，实现了样本-样本，样本-本类别原型，样本-各类别原型（有无加权）的对比学习损失
+    def supervised_contrastive_loss(self, features, labels, temperature=0.07):
+        """
+        计算监督对比损失（样本对样本）
+        features: [num_gt, feat_dim]
+        labels: [num_gt]
+        """
+        if features.shape[0] < 2:  # 至少需要2个样本才能计算对比损失
+            return torch.tensor(0.0, device=features.device)
+            
+        device = features.device
+        # 确保特征是 float32 类型
+        features = features.float()
+        features = F.normalize(features, dim=1)  # 特征归一化
+        similarity_matrix = torch.div(torch.matmul(features, features.T), temperature)  # [N, N]
+        # 去除自身
+        logits_mask = torch.ones_like(similarity_matrix) - torch.eye(features.shape[0], device=device)
+        similarity_matrix = similarity_matrix * logits_mask
+
+        # 数值稳定性处理：每行减去最大值
+        logits_max, _ = torch.max(similarity_matrix, dim=1, keepdim=True)
+        similarity_matrix = similarity_matrix - logits_max.detach()
+        similarity_matrix = similarity_matrix * logits_mask  # 再次mask，防止数值误差
+
+        # 构建正样本掩码
+        labels = labels.contiguous().view(-1, 1)
+        mask = torch.eq(labels, labels.T).float().to(device)
+        mask = mask * logits_mask  # 去掉自身
+
+        # log-softmax
+        exp_sim = torch.exp(similarity_matrix) * logits_mask
+        log_prob = similarity_matrix - torch.log(exp_sim.sum(1, keepdim=True) + 1e-8)
+
+        # 只对正样本求平均
+        mean_log_prob_pos = (mask * log_prob).sum(1) / (mask.sum(1) + 1e-8)
+        loss = -mean_log_prob_pos.mean()
+        return loss
+
+
+    def update_prototype_memory_multi_modal(self, features, labels, modal_layer_key):
+        """
+        更新多模态多层次原型库
+        features: [num_roi, feat_dim]
+        labels: [num_roi]
+        modal_layer_key: 模态-层键，如 "modal_0_layer_0"
+        """
+        device = features.device
+        # 确保特征转换为 float32 类型，避免 Half 精度的问题
+        features = features.detach().cpu().float()
+        labels = labels.detach().cpu()
+        
+        # 确保 prototype_memory 和 prototype_count 存在
+        if not hasattr(self, 'prototype_memory'):
+            self.prototype_memory = {}
+        if not hasattr(self, 'prototype_count'):
+            self.prototype_count = {}
+        
+        # 初始化该模态-层的原型库（如果还没有初始化）
+        if modal_layer_key not in self.prototype_memory:
+            self.prototype_memory[modal_layer_key] = {}
+        if modal_layer_key not in self.prototype_count:
+            self.prototype_count[modal_layer_key] = {}
+        
+        for i, label in enumerate(labels):
+            label = label.item()
+            if label not in self.prototype_memory[modal_layer_key]:
+                self.prototype_memory[modal_layer_key][label] = []
+            if label not in self.prototype_count[modal_layer_key]:
+                self.prototype_count[modal_layer_key][label] = 0
+                
+            # 添加到记忆库
+            self.prototype_memory[modal_layer_key][label].append(features[i])
+            self.prototype_count[modal_layer_key][label] += 1
+            
+            # 限制记忆库大小
+            if len(self.prototype_memory[modal_layer_key][label]) > self.prototype_memory_size:
+                self.prototype_memory[modal_layer_key][label].pop(0)
+                self.prototype_count[modal_layer_key][label] -= 1
+
+    def compute_prototype_loss_multi_modal(self, features, labels, modal_layer_key):
+        """
+        计算多模态多层次原型学习损失（原型-本类别特征相似度)
+        features: [num_roi, feat_dim]
+        labels: [num_roi]
+        modal_layer_key: 模态-层键
+        """
+        # 确保 prototype_memory 存在
+        if not hasattr(self, 'prototype_memory') or modal_layer_key not in self.prototype_memory:
+            return torch.tensor(0.0, device=features.device)
+            
+        device = features.device
+        total_loss = torch.tensor(0.0, device=device, dtype=torch.float32)
+        count = 0
+        
+        for i, label in enumerate(labels):
+            label = label.item()
+            if label in self.prototype_memory[modal_layer_key] and len(self.prototype_memory[modal_layer_key][label]) > 0:
+                # 计算原型（平均特征）
+                prototype_features = torch.stack(self.prototype_memory[modal_layer_key][label])
+                # 确保原型特征在正确的设备上并且是 float32 类型
+                prototype_features = prototype_features.to(device).float()
+                prototype_features = F.normalize(prototype_features, dim=1)
+                prototype = prototype_features.mean(dim=0, keepdim=True)
+                
+                # 计算当前特征与原型之间的相似度损失
+                # 确保当前特征也是 float32 类型，与原型特征保持一致
+                current_feature = features[i:i+1].float()
+                current_feature = F.normalize(current_feature, dim=1)
+                similarity = torch.matmul(current_feature, prototype.T)
+                # 修复：确保loss是标量，而不是矩阵
+                loss = (1.0 - similarity).squeeze()  # 将[1,1]压缩为标量
+                total_loss += loss
+                count += 1
+                
+        return total_loss / max(count, 1) * self.prototype_weight
+
+    def compute_contrastive_loss_with_prototypes(self, features, labels, modal_layer_key):
+        """
+        计算与原型库的对比学习损失
+        features: [num_roi, feat_dim]
+        labels: [num_roi]
+        modal_layer_key: 模态-层键
+        """
+        # 确保 prototype_memory 存在
+        if not hasattr(self, 'prototype_memory') or modal_layer_key not in self.prototype_memory:
+            return torch.tensor(0.0, device=features.device)
+            
+        device = features.device
+        temperature = 0.07
+        
+        if features.shape[0] < 2:
+            return torch.tensor(0.0, device=device)
+            
+        # 特征归一化 - 确保是 float32 类型
+        features = features.float()
+        features = F.normalize(features, dim=1)
+        
+        # 收集所有原型特征（使用均值）
+        prototype_features = []
+        prototype_labels = []
+        for label, feature_list in self.prototype_memory[modal_layer_key].items():
+            if len(feature_list) > 0:
+                # 计算该类别的均值原型
+                prototype_feat = torch.stack(feature_list)
+                # 确保原型特征在正确的设备上并且是 float32 类型
+                prototype_feat = prototype_feat.to(device).float()
+                prototype_feat = F.normalize(prototype_feat, dim=1)
+                prototype = prototype_feat.mean(dim=0, keepdim=True)
+                prototype_features.append(prototype.squeeze(0))
+                prototype_labels.append(label)
+            
+        if not prototype_features:
+            return torch.tensor(0.0, device=device)
+            
+        prototype_features = torch.stack(prototype_features)  # [num_prototypes, feat_dim]
+        prototype_features = F.normalize(prototype_features, dim=1)
+        
+        # 计算当前特征与原型特征之间的相似度
+        similarity_matrix = torch.div(
+            torch.matmul(features, prototype_features.T), temperature
+        )  # [num_roi, num_prototypes]
+        
+        # 构建标签匹配矩阵
+        labels = labels.contiguous().view(-1, 1)  # [num_roi, 1]
+        prototype_labels = torch.tensor(prototype_labels, device=device).contiguous().view(1, -1)  # [1, num_prototypes]
+        label_match = torch.eq(labels, prototype_labels).float()  # [num_roi, num_prototypes]
+        
+        # 计算对比损失
+        exp_sim = torch.exp(similarity_matrix)
+        log_prob = similarity_matrix - torch.log(exp_sim.sum(1, keepdim=True) + 1e-8)
+        
+        # 只对匹配的标签计算损失
+        mean_log_prob_pos = (label_match * log_prob).sum(1) / (label_match.sum(1) + 1e-8)
+        loss = -mean_log_prob_pos.mean()
+        
+        return loss * self.contrastive_weight if hasattr(self, 'contrastive_weight') else loss
+
+    def compute_contrastive_loss_with_weighted_negatives(self, features, labels, modal_layer_key):
+        """
+        计算与原型库的对比学习损失（带负样本加权）
+        features: [num_roi, feat_dim]
+        labels: [num_roi]
+        modal_layer_key: 模态-层键
+        """
+        # 确保 prototype_memory 存在
+        if not hasattr(self, 'prototype_memory') or modal_layer_key not in self.prototype_memory:
+            return torch.tensor(0.0, device=features.device)
+            
+        device = features.device
+        temperature = 0.07
+        
+        if features.shape[0] < 2:
+            return torch.tensor(0.0, device=device)
+            
+        # 特征归一化 - 确保是 float32 类型
+        features = features.float()
+        features = F.normalize(features, dim=1)
+        
+        # 收集所有原型特征（优化：只进行一次归一化）
+        prototype_features = []
+        prototype_labels = []
+        for label, feature_list in self.prototype_memory[modal_layer_key].items():
+            if len(feature_list) > 0:
+                prototype_feat = torch.stack(feature_list)
+                # 确保原型特征在正确的设备上并且是 float32 类型
+                prototype_feat = prototype_feat.to(device).float()
+                prototype_feat = F.normalize(prototype_feat, dim=1)
+                prototype = prototype_feat.mean(dim=0, keepdim=True)
+                prototype_features.append(prototype.squeeze(0))
+                prototype_labels.append(label)
+            
+        if not prototype_features:
+            return torch.tensor(0.0, device=device)
+            
+        prototype_features = torch.stack(prototype_features)  # [num_prototypes, feat_dim]
+        prototype_features = F.normalize(prototype_features, dim=1)
+        
+        # 计算当前特征与原型特征之间的相似度
+        similarity_matrix = torch.div(
+            torch.matmul(features, prototype_features.T), temperature
+        )  # [num_roi, num_prototypes]
+        
+        # 构建标签匹配矩阵
+        labels = labels.contiguous().view(-1, 1)  # [num_roi, 1]
+        prototype_labels = torch.tensor(prototype_labels, device=device).contiguous().view(1, -1)  # [1, num_prototypes]
+        label_match = torch.eq(labels, prototype_labels).float()  # [num_roi, num_prototypes]
+        
+        # ===== 优化后的负样本加权模块 =====
+        # 计算原型之间的相似度矩阵
+        prototype_similarity = torch.div(
+            torch.matmul(prototype_features, prototype_features.T), temperature
+        )  # [num_prototypes, num_prototypes]
+        
+        # 构建负样本加权矩阵
+        negative_weights = torch.zeros_like(similarity_matrix)  # [num_roi, num_prototypes]
+        
+        for i in range(features.shape[0]):  # 对每个当前样本
+            current_label = labels[i].item()
+            current_prototype_idx = None
+            
+            # 找到当前样本对应的原型索引
+            for j, proto_label in enumerate(prototype_labels.squeeze(0)):
+                if proto_label.item() == current_label:
+                    current_prototype_idx = j
+                    break
+            
+            if current_prototype_idx is not None:
+                # 获取当前原型与其他原型的相似度（不包括自身）
+                current_proto_similarities = prototype_similarity[current_prototype_idx]  # [num_prototypes]
+                
+                # 创建负样本掩码（排除自身）
+                negative_mask = torch.ones_like(current_proto_similarities)
+                negative_mask[current_prototype_idx] = 0
+                
+                # 计算负样本的困难程度权重
+                # 相似度越高，说明越容易混淆，权重应该越大
+                negative_similarities = current_proto_similarities * negative_mask
+                
+                # 使用sigmoid函数将相似度转换为权重，避免softmax的问题
+                # 相似度越高，权重越接近1；相似度越低，权重越接近0
+                negative_weights[i] = torch.sigmoid(negative_similarities * 5.0)  # 5.0是缩放因子
+        
+        # ===== 正确的负样本加权方式 =====
+        # 在exp空间中应用权重，而不是在原始相似度上
+        exp_sim = torch.exp(similarity_matrix)
+        
+        # 对负样本的exp项进行加权
+        negative_mask = (label_match == 0).float()  # 负样本掩码
+        weighted_exp_sim = exp_sim * (1 + negative_weights * negative_mask)
+        
+        # 计算加权后的log概率
+        log_prob = similarity_matrix - torch.log(weighted_exp_sim.sum(1, keepdim=True) + 1e-8)
+        
+        # 只对匹配的标签计算损失
+        mean_log_prob_pos = (label_match * log_prob).sum(1) / (label_match.sum(1) + 1e-8)
+        loss = -mean_log_prob_pos.mean()
+        
+        return loss * self.contrastive_weight if hasattr(self, 'contrastive_weight') else loss

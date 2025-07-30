@@ -526,11 +526,12 @@ class BaseModel_m(nn.Module):
 class DetectionModel_m(BaseModel_m):
     """YOLOv8 detection model."""
 
-    def __init__(self, cfg="yolov8n.yaml", ch=3, nc=None, verbose=True):  # model, input channels, number of classes
+    def __init__(self, cfg="yolov8n.yaml", ch=3, nc=None, verbose=True,is_contrastive_or_prototype=False):  # model, input channels, number of classes
         """Initialize the YOLOv8 detection model with the given config and parameters."""
         super().__init__()
         self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)  # cfg dict
         self.is_incremental = False
+        self.is_contrastive_or_prototype = is_contrastive_or_prototype
         # Define model
         ch = self.yaml["ch"] = self.yaml.get("ch", ch)  # input channels
         # 关键：类别数覆盖
@@ -640,17 +641,8 @@ class DetectionModel_m(BaseModel_m):
     def init_criterion(self):
         """Initialize the loss criterion for the DetectionModel."""
         #print(f"是否启用增量损失：{self.is_incremental}")
-        return v8DetectionLoss(self,self.is_incremental,self.base_nc)
+        return v8DetectionLoss(self,is_incremental=self.is_incremental,is_contrastive_or_prototype=self.is_contrastive_or_prototype,base_nc=self.base_nc)
 
-# # TODO：这里等等看要不要增量
-# class IncrementalDetectionModel_m(DetectionModel_m):
-#     """YOLOv8 detection model for incremental learning."""
-
-#     def init_criterion(self):
-#         """Initialize the loss criterion for incremental learning detection model."""
-#         # TODO: 在这里实现增量学习的损失函数
-#         # 可能需要包含蒸馏损失、知识保持损失等
-#         return v8DetectionLoss(self)  # 暂时使用原始损失，后续可以替换为增量学习损失
 
 
 class OBBModel_m(DetectionModel_m):
@@ -1270,11 +1262,21 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args.insert(1, [ch[x] for x in f])
         elif m is ScaleConvFuse:
             c1 = ch[f]
-            c2 = args[0]
+            if scale == 'h':
+                c2 = args[0]
+            else:
+                #面向tiny模型
+                c2 = make_divisible(args[0]*width,8) #这里做了修改
+                # print('args:',args)
+                for args_num in range(len(args)):
+                    if type(args[args_num]) is int:
+                        args[args_num]*=width
+                        args[args_num] = make_divisible(args[args_num], 8)
+                        # print(f"args[{args_num}]:{args[args_num]}")
             args = [c1, *args]
         else:
             c2 = ch[f]
-
+        # print(f"m:{str(m)}, args:{args},c1:{c1},c2:{c2}")
         m_ = nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)  # module
         t = str(m)[8:-2].replace("__main__.", "")  # module type
         m.np = sum(x.numel() for x in m_.parameters())  # number params

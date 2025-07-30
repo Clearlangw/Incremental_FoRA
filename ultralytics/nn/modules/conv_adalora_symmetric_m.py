@@ -513,10 +513,12 @@ class A2C2f_adalora_sym_m(nn.Module):
         super().__init__()
         
         c_ = int(c2 * e)
+        if c_<32:
+            c_=64
         # c_ = 128
         # print(f'c_:{c_}')
         c_ = min(96, c_)
-        assert c_ % 32 == 0, "Dimension of ABlock must be a multiple of 32."
+        assert c_ % 32 == 0, f"Dimension of ABlock must be a multiple of 32. c_={c_}"
         self.cv1 = Conv_adalora_sym_m(c1, c_, 1, 1, r, lora_alpha, lora_dropout)
         self.cv2 = Conv_adalora_sym_m((1 + n) * c_, c2, 1, 1, r, lora_alpha, lora_dropout)
         self.gamma = nn.Parameter(0.01 * torch.ones(c2), requires_grad=True) if a2 and residual else None

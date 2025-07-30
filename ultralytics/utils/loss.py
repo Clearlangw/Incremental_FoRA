@@ -3,6 +3,7 @@ import ultralytics.global_mode as gb
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision.ops import roi_align
 
 from ultralytics.utils.metrics import OKS_SIGMA
 from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
@@ -147,7 +148,7 @@ class KeypointLoss(nn.Module):
 class v8DetectionLoss:
     """Criterion class for computing training losses."""
 
-    def __init__(self, model,is_incremental=False,base_nc=0):  # model must be de-paralleled
+    def __init__(self, model,is_incremental=False,is_contrastive_or_prototype=False,base_nc=0):  # model must be de-paralleled
         """Initializes v8DetectionLoss with the model, defining model-related properties and BCE loss function."""
         device = next(model.parameters()).device  # get model device
         h = model.args  # hyperparameters
@@ -171,7 +172,79 @@ class v8DetectionLoss:
         self.bbox_loss = BboxLoss(m.reg_max - 1, use_dfl=self.use_dfl).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
         self.is_incremental = is_incremental
+        self.is_contrastive_or_prototype = is_contrastive_or_prototype
         self.base_nc = base_nc
+        
+
+    def extract_roi_features_single(self, feat, targets, output_size=(3, 3)):
+        """
+        从单层特征图中提取ROI特征
+        feat: [bs, c, h, w] 单层特征
+        targets: [num_gt, 6], [imgid, clsid, cx, cy, w, h] (归一化)
+        output_size: roi_align输出尺寸
+        return: [num_gt, c] tensor, [num_gt] clsid tensor
+        """
+        device = feat.device
+        num_gt = targets.shape[0]
+        if num_gt == 0:
+            return torch.empty(0, feat.shape[1], device=device), torch.empty(0, dtype=torch.long, device=device)
+            
+        imgids = targets[:, 0].long()
+        clsids = targets[:, 1].long()
+        cxs = targets[:, 2]
+        cys = targets[:, 3]
+        ws = targets[:, 4]
+        hs = targets[:, 5]
+
+        bs, c, h, w = feat.shape
+        # 归一化坐标转特征图坐标
+        x1 = (cxs - ws / 2) * w
+        y1 = (cys - hs / 2) * h
+        x2 = (cxs + ws / 2) * w
+        y2 = (cys + hs / 2) * h
+        # 修复：确保boxes的数据类型与feat一致
+        boxes = torch.stack([imgids.float(), x1, y1, x2, y2], dim=1).to(device=device, dtype=feat.dtype)  # [num_gt, 5]
+        # roi_align
+        roi_feat = roi_align(feat, boxes, output_size=output_size, spatial_scale=1.0, aligned=True)  # [num_gt, c, out_h, out_w]
+        roi_feat = roi_feat.view(num_gt, -1)  # flatten
+        return roi_feat, clsids
+
+    # def supervised_contrastive_loss(self, features, labels, temperature=0.07):
+    #     """
+    #     计算监督对比损失
+    #     features: [num_gt, feat_dim]
+    #     labels: [num_gt]
+    #     """
+    #     if features.shape[0] < 2:  # 至少需要2个样本才能计算对比损失
+    #         return torch.tensor(0.0, device=features.device)
+            
+    #     device = features.device
+    #     features = F.normalize(features, dim=1)  # 特征归一化
+    #     similarity_matrix = torch.div(torch.matmul(features, features.T), temperature)  # [N, N]
+    #     # 去除自身
+    #     logits_mask = torch.ones_like(similarity_matrix) - torch.eye(features.shape[0], device=device)
+    #     similarity_matrix = similarity_matrix * logits_mask
+
+    #     # 数值稳定性处理：每行减去最大值
+    #     logits_max, _ = torch.max(similarity_matrix, dim=1, keepdim=True)
+    #     similarity_matrix = similarity_matrix - logits_max.detach()
+    #     similarity_matrix = similarity_matrix * logits_mask  # 再次mask，防止数值误差
+
+    #     # 构建正样本掩码
+    #     labels = labels.contiguous().view(-1, 1)
+    #     mask = torch.eq(labels, labels.T).float().to(device)
+    #     mask = mask * logits_mask  # 去掉自身
+
+    #     # log-softmax
+    #     exp_sim = torch.exp(similarity_matrix) * logits_mask
+    #     log_prob = similarity_matrix - torch.log(exp_sim.sum(1, keepdim=True) + 1e-8)
+
+    #     # 只对正样本求平均
+    #     mean_log_prob_pos = (mask * log_prob).sum(1) / (mask.sum(1) + 1e-8)
+    #     loss = -mean_log_prob_pos.mean()
+    #     return loss
+
+
 
     def preprocess(self, targets, batch_size, scale_tensor):
         """Preprocesses the target counts and matches with the input batch size to output a tensor."""
@@ -189,6 +262,27 @@ class v8DetectionLoss:
                     out[j, :n] = targets[matches, 1:]
             out[..., 1:5] = xywh2xyxy(out[..., 1:5].mul_(scale_tensor))
         return out
+
+    def normalize_bboxes(self, targets,batch_size):
+        """
+        将GT相对坐标归纳在一起，和preprocess不一样
+        batch_size: 批量大小
+        """
+        if targets.shape[0] == 0:
+            out = torch.zeros(batch_size, 0, 5, device=self.device)
+        else:
+            i = targets[:, 0]  # image index
+            _, counts = i.unique(return_counts=True)
+            counts = counts.to(dtype=torch.int32)
+            out = torch.zeros(batch_size, counts.max(), 5, device=self.device)
+            for j in range(batch_size):
+                matches = i == j
+                n = matches.sum()
+                if n:
+                    out[j, :n] = targets[matches, 1:]
+            # out[..., 1:5] = xywh2xyxy(out[..., 1:5].mul_(scale_tensor))
+        return out[...,1:5]
+        
 
     def bbox_decode(self, anchor_points, pred_dist):
         """Decode predicted object bounding box coordinates from anchor points and distribution."""
@@ -208,6 +302,8 @@ class v8DetectionLoss:
         # else:
         #     loss = torch.zeros(3, device=self.device)  # box, cls, dfl
         batch_size = 0
+        all_roi_features = []
+        # all_roi_labels = []
         # print(len(preds))
         # print(len(preds[0]))
         # print(len(preds[1]))
@@ -222,7 +318,7 @@ class v8DetectionLoss:
         # print(self.hyp.model)
         if self.modal == 'both' and 'yolov8x.yaml' not in self.hyp.model:
             hyper_weight = 0.5
-            for i in range(3):
+            for i in range(3): #遍历RGB，IR，Fusion三个模态
                 # det_index = i + 1
                 if i == 2:
                     hyper_weight = 1
@@ -233,7 +329,7 @@ class v8DetectionLoss:
                 # print(f'i is {i}')
                 # print(f'preds is {preds}')
                 if isinstance(preds[i], tuple):
-                    feats = preds[i][1]
+                    feats = preds[i][1]  # 多尺度特征 [feat1, feat2, feat3]
                     if len(preds[i])>2:
                          base_nc_feats = preds[i][2]
                 elif isinstance(preds[i], dict) and self.is_incremental:
@@ -267,10 +363,15 @@ class v8DetectionLoss:
 
                 # Targets
                 targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["bboxes"]), 1)
+                if self.is_contrastive_or_prototype:
+                    norm_bboxes = self.normalize_bboxes(targets.to(self.device),batch_size)
+
                 targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
+                # 示例tensor([[  7.0000, 169.8720, 337.9572, 185.6079, 354.6466],
+                #     [  7.0000, 658.1540, 337.9572, 673.8897, 354.6466]], device='cuda:0')
                 gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
                 mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0)
-
+                
                 # Pboxes
                 pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
 
@@ -284,14 +385,7 @@ class v8DetectionLoss:
                 )
 
                 target_scores_sum = max(target_scores.sum(), 1)
-                # Cls loss
-                # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-                # print(f"pred_scores.shape: {pred_scores.shape}")
-                # print(f"target_scores.shape: {target_scores.shape}")
-                # print(f"pred_scores sample: {pred_scores[0][0]}")
-                # print(f"target_scores sample: {target_scores[0][0]}")
-                # import sys
-                # sys.exit()
+
                 tmp_loss[1] += self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
                 # Bbox loss
                 if fg_mask.sum():
@@ -300,6 +394,58 @@ class v8DetectionLoss:
                         pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum,
                         fg_mask
                     )
+                    
+                    # 提取多尺度ROI特征用于原型学习和对比学习
+                    # 为每个模态的每个特征层提取ROI特征
+                    if self.is_contrastive_or_prototype:
+                        for layer_idx, feat in enumerate(feats):
+                            # 构建targets用于ROI特征提取: [imgid, clsid, cx, cy, w, h] (归一化格式)
+                            roi_targets_list = []
+                            for b in range(batch_size):
+                                # 获取当前batch的有效GT
+                                valid_mask = mask_gt[b].squeeze(-1)  # (max_objects,)
+                                valid_indices = torch.where(valid_mask)[0]  # 有效GT的索引
+                                
+                                if len(valid_indices) == 0:
+                                    continue
+                                    
+                                # 获取有效GT的标签和边界框
+                                tmp_labels = gt_labels[b, valid_indices, 0]  # (num_valid_gt,)
+                                tmp_bboxes = norm_bboxes[b, valid_indices]     # (num_valid_gt, 4) (cxcywh格式)
+                                
+                                # 提取bbox的各个坐标分量
+                                cx = tmp_bboxes[:, 0]  # 中心x坐标
+                                cy = tmp_bboxes[:, 1]  # 中心y坐标
+                                w = tmp_bboxes[:, 2]   # 宽度
+                                h = tmp_bboxes[:, 3]   # 高度
+                                
+                                # 构建targets: [imgid, clsid, cx, cy, w, h]
+                                batch_targets = torch.stack([
+                                    torch.full_like(tmp_labels, b),  # imgid
+                                    tmp_labels,  # clsid
+                                    cx, cy, w, h  # bbox坐标分量
+                                ], dim=1)
+                                
+                                roi_targets_list.append(batch_targets)
+                                # import pdb
+                                # pdb.set_trace()
+                            if roi_targets_list:
+                                roi_targets = torch.cat(roi_targets_list, dim=0)  # (total_valid_gt, 6)
+                                roi_features, roi_labels = self.extract_roi_features_single(
+                                    feat, roi_targets, output_size=(3, 3)
+                                )
+                                
+                                if roi_features.shape[0] > 0:
+                                    # 存储特征信息：(模态索引, 层索引, 特征, 标签)
+                                    all_roi_features.append({
+                                        'modal_idx': i,
+                                        'layer_idx': layer_idx,
+                                        'features': roi_features,
+                                        'labels': roi_labels
+                                    })
+                                    # all_roi_labels.extend(roi_labels.cpu().numpy())
+                                    #有多个gt所以len(all_roi_labels)和len(all_roi_features)不一样
+
                 if self.is_incremental and self.base_nc!=0 and self.use_gfsd:
                     # KL损失：保证pred_scores和base_scores的前base_nc个类别的预测值尽可能相似
                     # 对base_scores和pred_scores的前base_nc个类别进行sigmoid
@@ -315,7 +461,6 @@ class v8DetectionLoss:
                         base_logits_fg = base_scores.reshape(-1, base_scores.shape[-1])[base_fg_mask_dim1]
 
                         # 3. 【列筛选】使用切片操作，直接从类别维度取出前 self.base_nc 个基类
-                        #    这是根据您的新要求所做的核心修改
                         #    形状从 (num_fg, total_num_classes) -> (num_fg, self.base_nc)
                         pred_logits_base = pred_logits_fg[..., :self.base_nc]
                         base_logits_base = base_logits_fg[..., :self.base_nc]
@@ -341,13 +486,16 @@ class v8DetectionLoss:
                 tmp_loss[2] *= (self.hyp.dfl * hyper_weight)  # dfl gain
                 if self.is_incremental and self.base_nc!=0 and self.use_gfsd:
                     tmp_loss[2] += kl_loss*0.5
+
                 loss[0] += tmp_loss[0]
                 loss[1] += tmp_loss[1]
                 loss[2] += tmp_loss[2]
-                # if self.is_incremental and self.base_nc!=0 and self.use_gfsd:
-                #     loss[3] += tmp_loss[3]
 
-            return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
+            # 如果有ROI特征，则作为额外返回值输出
+            if self.is_contrastive_or_prototype and all_roi_features:
+                return loss.sum() * batch_size, loss.detach(), all_roi_features
+            else:
+                return loss.sum() * batch_size, loss.detach()
         else:
             if isinstance(preds[i], tuple):
                 feats = preds[i][1]
@@ -356,10 +504,7 @@ class v8DetectionLoss:
                 base_nc_feats = preds[i]['base_x']
             else:
                 feats = preds[i]
-            # print(isinstance(preds,tuple))
-            # print(feats[0].shape)
-            # print(feats[1].shape)
-            # print(feats[2].shape)
+
             pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
                 (self.reg_max * 4, self.nc), 1
             )

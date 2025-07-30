@@ -22,6 +22,9 @@ class ScaleMergeFuse(nn.Module):
         super().__init__()
         if hidden_channels is None:
             hidden_channels = in_channels
+        if in_channels % groups != 0:
+            raise ValueError(f"in_channels ({in_channels}) 必须能被 groups ({groups}) 整除！")
+        # print(f"in_channels: {in_channels}, hidden_channels: {hidden_channels}, kernel_size: {kernel_size}, groups: {groups}")
         self.split_kernel = nn.ModuleList([
             Conv(in_channels, hidden_channels, k, p=autopad(k), g=groups)
             for k in kernel_size
@@ -54,7 +57,8 @@ class ScaleConvFuse(nn.Module):
 
         if hidden_channels is None:
             hidden_channels = in_channels
-        
+        if in_channels % (hidden_channels if seperate_pw_dw else 1) != 0:
+            raise ValueError(f"in_channels ({in_channels}) 必须能被 groups ({hidden_channels if seperate_pw_dw else 1}) 整除！")
         assert strip_conv in ['None', 'Serial', 'Parallel']
         if strip_conv in ['None', 'Parallel']:
             if strip_conv == 'None':

@@ -3,7 +3,7 @@ gb.set_global_mode('both')
 from ultralytics import YOLO_m
 
 
-model = YOLO_m("/root/FoRA/250611newmodel_multi_head_ScaleConvFuse.yaml")
+model = YOLO_m("/root/FoRA/yolov8s_250611newmodel_multi_head_ScaleConvFuse.yaml")
 # print(model.model.modal)
 model.model.modal = 'both'
 

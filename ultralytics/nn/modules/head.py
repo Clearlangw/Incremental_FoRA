@@ -167,8 +167,8 @@ class ReDetect(nn.Module):
             dbox = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
 
         #TODO:这里分析最终输出的logits到底选哪个
-        #novel_base_cls = novel_cls[:, :self.base_nc]  # novel_cls的前base_nc个类别
-        novel_base_cls = base_x_cat
+        novel_base_cls = novel_cls[:, :self.base_nc]  # novel_cls的前base_nc个类别
+        #novel_base_cls = base_x_cat
         novel_novel_cls = novel_cls[:, self.base_nc:]  # novel_cls的后novel_nc个类别
         # # 融合策略：可以选择使用base_cls或novel_base_cls，这里使用novel_base_cls
         fused_cls = torch.cat((novel_base_cls, novel_novel_cls), 1)

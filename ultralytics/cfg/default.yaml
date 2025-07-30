@@ -49,6 +49,16 @@ teacher: None
 distillation_loss: None
 distill_layers: [6]
 
+# Contrastive Learning and Prototype Learning settings -----------------------------------------
+use_contrastive: False # (bool) whether to use contrastive learning
+contrastive_weight: 0.1 # (float) weight for contrastive learning loss
+contrastive_temperature: 0.07 # (float) temperature parameter for contrastive learning
+contrastive_output_size: (3, 3) # (tuple) output size for contrastive learning features
+use_negative_weighted_contrastive: False # (bool) whether to use weighted negative samples in contrastive learning
+use_prototype: False # (bool) whether to use prototype learning
+prototype_weight: 0.1 # (float) weight for prototype learning loss
+prototype_memory_size: 20 # (int) size of prototype memory for each class
+
 # Val/Test settings ----------------------------------------------------------------------------------------------------
 val: True # (bool) validate/test during training
 split: val # (str) dataset split to use for validation, i.e. 'val', 'test' or 'train'

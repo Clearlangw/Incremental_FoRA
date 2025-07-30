@@ -87,13 +87,14 @@ class DetectionTrainer_m(BaseTrainer_m):
         self.model.args = self.args  # attach hyperparameters to model
         # TODO: self.model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc
 
+    #这里实现了最终加载模型到is_contrastive_or_prototype
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Return a YOLO detection model."""
         #TODO:这里检查加载的模型
         # print(cfg)
         # import sys
         # sys.exit()
-        model = DetectionModel_m(cfg, nc=self.data["nc"], verbose=verbose and RANK == -1)
+        model = DetectionModel_m(cfg, nc=self.data["nc"], verbose=verbose and RANK == -1,is_contrastive_or_prototype=self.is_contrastive_or_prototype)
         if weights:
             model.load(weights)
         return model

@@ -228,7 +228,7 @@ class Model(nn.Module):
         """
         suffix = Path(weights).suffix
         if suffix == ".pt":
-            self.model, self.ckpt = attempt_load_one_weight(weights,incremental_yaml=self.incremental_yaml)
+            self.model, self.ckpt = attempt_load_one_weight(weights,incremental_yaml=self.incremental_yaml)#这里实现了偷梁换柱的reload
             self.task = self.model.args["task"]
             self.overrides = self.model.args = self._reset_ckpt_args(self.model.args)
             self.ckpt_path = self.model.pt_path
