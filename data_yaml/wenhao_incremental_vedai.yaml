@@ -1,0 +1,18 @@
+path: /root/autodl-tmp/
+train_rgb: wenhao_fewshot_incremental_dv_vedai/rgb/images/train/ # 原来为fewshot_incremental_dv_vedai/rgb/images/train/这个感觉有点问题
+val_rgb: wenhao_fewshot_incremental_dv_vedai/rgb/images/train/ # dv_vedai/rgb/images/test/
+test_rgb: wenhao_fewshot_incremental_dv_vedai/rgb/images/train/ # dv_vedai/rgb/images/test/
+
+train_ir: wenhao_fewshot_incremental_dv_vedai/ir/images/train/ # 原来为fewshot_incremental_dv_vedai/ir/images/train/这个感觉有点问题
+val_ir: wenhao_fewshot_incremental_dv_vedai/ir/images/train/ #dv_vedai/ir/images/test/
+test_ir: wenhao_fewshot_incremental_dv_vedai/ir/images/train/ #dv_vedai/ir/images/test/
+
+names:
+  0: car
+  1: truck
+  2: bus
+  3: feright_car
+  4: van
+  5: pick-up
+  6: camping-car
+  7: tractor

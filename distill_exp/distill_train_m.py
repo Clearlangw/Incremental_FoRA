@@ -11,7 +11,7 @@ teacher = YOLO_m("/root/autodl-tmp/multi_head_yolov8n_lma_weights/weights/best.p
 student.model.modal = 'both'
 teacher.model.modal = 'both'
 
-student.train(data="vedaifewshot_dv_vedai.yaml",
+student.train(data="/root/FoRA/data_yaml/vedaifewshot_dv_vedai.yaml",
             teacher=teacher.model,
             distill_layers=[6,8,21],
             distillation_loss="cwd",

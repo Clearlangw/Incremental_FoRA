@@ -3,8 +3,8 @@ import shutil
 from PIL import Image
 
 # 基础配置
-source_base_dir = '/root/autodl-tmp/old_fewshot_incremental_dv_vedai/'  # 原始数据集位置(即原来的shot85)
-target_base_dir = '/root/autodl-tmp/fewshot_incremental_dv_vedai/'  # 新数据集位置
+source_base_dir = '/root/autodl-tmp/shot85/'  # 原始数据集位置(即原来的shot85)
+target_base_dir = '/root/autodl-tmp/wenhao_fewshot_incremental_dv_vedai/'  # 新数据集位置
 nameidmap = {'car': 0, 'truck': 1, 'bus': 2, 'feright_car': 3, 'van': 4,'pick-up':5,
     'camping-car':6,'tractor':7}  # 类名到ID的映射
 

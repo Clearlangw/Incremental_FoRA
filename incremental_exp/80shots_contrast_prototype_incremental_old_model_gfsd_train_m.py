@@ -23,17 +23,17 @@ from ultralytics import YOLO_m
 #             r_target=6,
 #             adalora=True,
 #             project="incremental_old_model_gfsd_train_m",
-#             name='contrast_prototype_only_test_bug_80shots_normal_incremental_vedai2dvvedai',
+#             name='not_reload_novel_cv3_contrast_prototype_only_test_bug_80shots_normal_incremental_vedai2dvvedai',
 #             # pretrained=False,
 #             optimizer='SGD',
-#             lr0 = 0.005,
+#             lr0 = 0.005,#reload的话当时设置的是0.005
 #             seed=0,
 #             freeze=55,
 #             # resume=True,
 #             )
 ##恢复
 
-# model = YOLO_m("/root/FoRA/incremental_old_model_gfsd_train_m/contrast_prototype_only_test_bug_80shots_normal_incremental_vedai2dvvedai/weights/best.pt")
+# model = YOLO_m("/root/FoRA/incremental_old_model_gfsd_train_m/not_reload_novel_cv3_contrast_prototype_only_test_bug_80shots_normal_incremental_vedai2dvvedai/weights/best.pt")
 # model.model.modal = 'both'
 # model.train(data="80shots_incremental_vedai.yaml",
 #             #incremental_yaml = "yolov8h_incremental_lma_multi_head_ScaleConvFuse.yaml",#增量的模型
@@ -55,7 +55,7 @@ from ultralytics import YOLO_m
 #             resume=True,
 #             )
 ##测试
-model = YOLO_m("/root/FoRA/incremental_old_model_gfsd_train_m/contrast_prototype_only_test_bug_80shots_normal_incremental_vedai2dvvedai/weights/best.pt")
+model = YOLO_m("/root/FoRA/incremental_old_model_gfsd_train_m/not_reload_novel_cv3_contrast_prototype_only_test_bug_80shots_normal_incremental_vedai2dvvedai/weights/best.pt")
 model.model.modal = 'both'
 model.val(data="incremental_vedai2dvvedai.yaml",
           project="incremental_old_model_gfsd_train_m",

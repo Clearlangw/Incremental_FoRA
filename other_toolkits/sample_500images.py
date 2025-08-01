@@ -5,7 +5,7 @@ import random
 
 def copy_random_files(base_path, num_files=500):
     # categories = ['train', 'val', 'test']
-    categories = ['train']
+    categories = ['test']
     types = ['rgb', 'ir']
     components = ['images', 'labels']
     image_extensions = ['.jpg', '.png', '.bmp']  # 支持的图像文件类型
@@ -14,8 +14,8 @@ def copy_random_files(base_path, num_files=500):
     random.seed(42)
 
     # 在 base_path 后添加 _random100 后缀
-    new_base_path = f"{base_path}_fewshot_allvedai"
-
+    # new_base_path = f"{base_path}_fullvedai"
+    new_base_path = os.path.join(os.path.dirname(base_path), "dv_vedai_small_test")
     # 遍历每种类别（train, val, test）
     for category in categories:
         # 生成两种文件类型（images 和 labels）及两种传感器类型（rgb 和 ir）的路径
@@ -47,7 +47,10 @@ def copy_random_files(base_path, num_files=500):
         non_vedai_files = [f for f in all_image_files if 'vedai' not in f]
 
         # 计算各自要抽取的数量
-        num_vedai = int(num_files * 1) #原来0.6
+        # num_vedai = int(num_files * 1) #原来0.6
+        # num_non_vedai = num_files - num_vedai
+        #num_vedai = len(vedai_files)
+        num_vedai = int(num_files * 0.8)
         num_non_vedai = num_files - num_vedai
 
         if len(vedai_files) < num_vedai or len(non_vedai_files) < num_non_vedai:

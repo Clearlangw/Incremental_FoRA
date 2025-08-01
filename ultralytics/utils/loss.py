@@ -61,6 +61,54 @@ class FocalLoss(nn.Module):
         return loss.mean(1).sum()
 
 
+
+class FocalLossforDetection(nn.Module):
+    """
+    Focal Loss, a wrapper around BCEWithLogitsLoss.
+    This class is designed to be a drop-in replacement for nn.BCEWithLogitsLoss(reduction="none").
+    """
+    def __init__(self, gamma=1.5, alpha=0.25):
+        """
+        Initializer for the Focal Loss class.
+        Args:
+            gamma (float): The focusing parameter. Defaults to 1.5.
+            alpha (float): The balancing parameter. Defaults to 0.25.
+        """
+        super(FocalLossforDetection, self).__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+
+    def forward(self, pred, label):
+        """
+        Calculates the focal loss for each element.
+        Args:
+            pred (torch.Tensor): The model's raw output (logits).
+            label (torch.Tensor): The ground truth labels.
+        Returns:
+            torch.Tensor: A tensor of the same shape as input, containing the per-element focal loss.
+        """
+        # 1. 计算基础的 BCE Loss，不进行任何缩减
+        bce_loss = F.binary_cross_entropy_with_logits(pred, label, reduction="none")
+
+        # 2. 计算 p_t，即模型预测正确的概率
+        pred_prob = torch.sigmoid(pred)  # 将 logits 转换为概率
+        p_t = label * pred_prob + (1 - label) * (1 - pred_prob)
+
+        # 3. 计算调制因子 (modulating factor)
+        modulating_factor = (1.0 - p_t) ** self.gamma
+
+        # 4. 计算 alpha 权重因子
+        # alpha_factor = label * self.alpha + (1 - label) * (1 - self.alpha)
+        # 写法优化：
+        alpha_factor = torch.where(label.bool(), self.alpha, 1 - self.alpha)
+
+
+        # 5. 计算最终的 Focal Loss
+        focal_loss = alpha_factor * modulating_factor * bce_loss
+
+        return focal_loss
+
+
 class BboxLoss(nn.Module):
     """Criterion class for computing training losses during training."""
 
@@ -157,7 +205,11 @@ class v8DetectionLoss:
         #print(self.modal)
         m = model.model[-1]  # Detect() module
         # m_list = [model.model[-3],model.model[-2],model.model[-1]]
-        self.bce = nn.BCEWithLogitsLoss(reduction="none")
+        self.bce_mode = True
+        if self.bce_mode:
+            self.bce = nn.BCEWithLogitsLoss(reduction="none")
+        else:
+            self.bce = FocalLossforDetection(gamma=1.5, alpha=0.25)  # 使用FocalLoss替换BCE
         self.hyp = h
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
@@ -482,7 +534,10 @@ class v8DetectionLoss:
                     
                     
                 tmp_loss[0] *= (self.hyp.box * hyper_weight)  # box gain
-                tmp_loss[1] *= (self.hyp.cls * hyper_weight)  # cls gain
+                if self.bce_mode:
+                    tmp_loss[1] *= (self.hyp.cls * hyper_weight)  # cls gain
+                else:
+                    tmp_loss[1] *= (self.hyp.cls * hyper_weight * 10)  # cls gain
                 tmp_loss[2] *= (self.hyp.dfl * hyper_weight)  # dfl gain
                 if self.is_incremental and self.base_nc!=0 and self.use_gfsd:
                     tmp_loss[2] += kl_loss*0.5
@@ -550,7 +605,10 @@ class v8DetectionLoss:
                 )
 
             loss[0] *= self.hyp.box  # box gain
-            loss[1] *= self.hyp.cls  # cls gain
+            if self.bce_mode:
+                loss[1] *= self.hyp.cls  # cls gain
+            else:
+                loss[1] *= (self.hyp.cls * 10)  # cls gain
             loss[2] *= self.hyp.dfl  # dfl gain
 
             return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)

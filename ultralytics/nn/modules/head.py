@@ -174,7 +174,7 @@ class ReDetect(nn.Module):
         fused_cls = torch.cat((novel_base_cls, novel_novel_cls), 1)
         # fused_cls = novel_cls
         fused_cls_sigmoid = fused_cls.sigmoid()
-        # 对新类别部分加bonus
+        # 对新类别部分加bonus（已测试，有增益）
         if fused_cls_sigmoid.shape[1] > self.base_nc:
             novel_part = fused_cls_sigmoid[:, self.base_nc:]
             base_part = fused_cls_sigmoid[:, :self.base_nc]
@@ -186,6 +186,7 @@ class ReDetect(nn.Module):
             # base_mask需要扩展到novel_mask的shape
             combined_mask = novel_mask & base_mask.expand_as(novel_mask)
             novel_part[combined_mask] += 0.15
+        
         y = torch.cat((dbox, fused_cls_sigmoid), 1)
 
         return y if self.export else (y, x, base_x)

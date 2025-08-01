@@ -972,53 +972,56 @@ def rebuild_model_with_redetect(ckpt,new_model):
     # print(list(new_model.state_dict().keys()))
     # import sys
     # sys.exit()
+    reload_novel_cv3 = True
+    LOGGER.info(f"reload_novel_cv3(是否加载头部非最终参数）是否启用: {reload_novel_cv3}")
+    if reload_novel_cv3:
     # 迁移novel_cv3权重，仿照base_cv3的遍历方式
-    for k in list(state_dict.keys()):
-        key_parts = k.split('.')
-        # 检查是否是base_cv3层且在目标layer_id中
-        if (len(key_parts) >= 3 and
-            key_parts[2] == 'base_cv3' and
-            int(key_parts[1]) in dfl_layer_ids):
-            novel_key_parts = key_parts.copy()
-            novel_key_parts[2] = 'novel_cv3'
-            novel_key = '.'.join(novel_key_parts)
-            print(f"检测到需要迁移: {novel_key}")
-            # 分类卷积层特殊处理
-            # 'model.57.cv3.0.2.weight'
-            if len(key_parts) == 6 and key_parts[-1] in ['weight', 'bias'] and int(key_parts[-2]) == 2 and int(key_parts[-3]) in [0,1,2]:
-                pass
-                # state_dict[novel_key] = new_model.state_dict()[novel_key]
-                # state_dict[novel_key][:base_nc] = state_dict[k][:base_nc]
-                # if key_parts[-1] == 'bias':
-                #     # base_nc之后的bias全部赋值为前base_nc的均值
-                #     # mean_val = state_dict[k][:base_nc].mean()
-                #     # state_dict[novel_key][base_nc:] = mean_val
-                #     base_biases = state_dict[k][:base_nc] #k是原来的值
-                #     mean_val = base_biases.mean()
-                #     std_val = base_biases.std()
-                #     # b. 用计算出的均值和标准差来初始化新类别的 bias
-                #     #    这样新 bias 就有了和旧 bias 相似的数值范围和分布，同时打破了对称性
-                #     target_slice = state_dict[novel_key][base_nc:]
-                #     torch.nn.init.normal_(target_slice, mean=mean_val, std=std_val)
-                # if key_parts[-1] == 'weight':
-                #     # # 用前base_nc个的均值初始化后base_nc个
-                #     # w = state_dict[k]
-                #     # # 计算每个in_channel、h、w的均值，shape为[1, in_c, h, w]
-                #     # mean_vec = w[:base_nc].mean(dim=0, keepdim=True)
-                #     # # 用前base_nc个的均值初始化后base_nc个，并加噪声
-                #     # noise_std = w[:base_nc].std().item()  # 用前base_nc的方差作为噪声强度
-                #     # noise = torch.randn_like(state_dict[novel_key][base_nc:]) * noise_std
-                #     # state_dict[novel_key][base_nc:] = mean_vec.expand_as(state_dict[novel_key][base_nc:]) + noise
-                #     base_weights = state_dict[k][:base_nc]
-                #     mean_vec = base_weights.mean(dim=0, keepdim=True) # 计算平均滤波器
-                #     std_val = base_weights.std() # 计算整体标准差
-                #     # b. 将平均滤波器作为基础，加上符合旧分布的噪声
-                #     #    这能确保新 weight 在“风格”上和旧 weight 类似，但又各不相同
-                #     target_slice = state_dict[novel_key][base_nc:]
-                #     noise = torch.randn_like(target_slice) * std_val
-                #     target_slice.copy_(mean_vec.expand_as(target_slice) + noise)
-            else:
-                state_dict[novel_key] = state_dict[k].clone()
+        for k in list(state_dict.keys()):
+            key_parts = k.split('.')
+            # 检查是否是base_cv3层且在目标layer_id中
+            if (len(key_parts) >= 3 and
+                key_parts[2] == 'base_cv3' and
+                int(key_parts[1]) in dfl_layer_ids):
+                novel_key_parts = key_parts.copy()
+                novel_key_parts[2] = 'novel_cv3'
+                novel_key = '.'.join(novel_key_parts)
+                print(f"检测到需要迁移: {novel_key}")
+                # 分类卷积层特殊处理
+                # 'model.57.cv3.0.2.weight'
+                if len(key_parts) == 6 and key_parts[-1] in ['weight', 'bias'] and int(key_parts[-2]) == 2 and int(key_parts[-3]) in [0,1,2]:
+                    pass
+                    # state_dict[novel_key] = new_model.state_dict()[novel_key]
+                    # state_dict[novel_key][:base_nc] = state_dict[k][:base_nc]
+                    # if key_parts[-1] == 'bias':
+                    #     # base_nc之后的bias全部赋值为前base_nc的均值
+                    #     # mean_val = state_dict[k][:base_nc].mean()
+                    #     # state_dict[novel_key][base_nc:] = mean_val
+                    #     base_biases = state_dict[k][:base_nc] #k是原来的值
+                    #     mean_val = base_biases.mean()
+                    #     std_val = base_biases.std()
+                    #     # b. 用计算出的均值和标准差来初始化新类别的 bias
+                    #     #    这样新 bias 就有了和旧 bias 相似的数值范围和分布，同时打破了对称性
+                    #     target_slice = state_dict[novel_key][base_nc:]
+                    #     torch.nn.init.normal_(target_slice, mean=mean_val, std=std_val)
+                    # if key_parts[-1] == 'weight':
+                    #     # # 用前base_nc个的均值初始化后base_nc个
+                    #     # w = state_dict[k]
+                    #     # # 计算每个in_channel、h、w的均值，shape为[1, in_c, h, w]
+                    #     # mean_vec = w[:base_nc].mean(dim=0, keepdim=True)
+                    #     # # 用前base_nc个的均值初始化后base_nc个，并加噪声
+                    #     # noise_std = w[:base_nc].std().item()  # 用前base_nc的方差作为噪声强度
+                    #     # noise = torch.randn_like(state_dict[novel_key][base_nc:]) * noise_std
+                    #     # state_dict[novel_key][base_nc:] = mean_vec.expand_as(state_dict[novel_key][base_nc:]) + noise
+                    #     base_weights = state_dict[k][:base_nc]
+                    #     mean_vec = base_weights.mean(dim=0, keepdim=True) # 计算平均滤波器
+                    #     std_val = base_weights.std() # 计算整体标准差
+                    #     # b. 将平均滤波器作为基础，加上符合旧分布的噪声
+                    #     #    这能确保新 weight 在“风格”上和旧 weight 类似，但又各不相同
+                    #     target_slice = state_dict[novel_key][base_nc:]
+                    #     noise = torch.randn_like(target_slice) * std_val
+                    #     target_slice.copy_(mean_vec.expand_as(target_slice) + noise)
+                else:
+                    state_dict[novel_key] = state_dict[k].clone()
     # 加载修改后的权重
     missing_keys, unexpected_keys = new_model.load_state_dict(state_dict, strict=False)
     
